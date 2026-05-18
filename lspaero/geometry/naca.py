@@ -85,3 +85,67 @@ def naca4(code: str, n_panels: int, closed_te: bool = True):
     x = np.concatenate([xl[::-1], xu[1:]])
     z = np.concatenate([zl[::-1], zu[1:]])
     return x, z
+
+
+def naca4_surfaces(code: str, n_chord: int, closed_te: bool = True):
+    """Upper and lower NACA 4-digit profile nodes from LE to TE.
+
+    Parameters
+    ----------
+    code : str
+        NACA 4-digit designation, e.g. ``'0012'``, ``'2412'``.
+    n_chord : int
+        Number of chordwise panels per surface; returns ``n_chord + 1`` nodes.
+    closed_te : bool
+        If True use the modified last coefficient that closes the TE exactly.
+
+    Returns
+    -------
+    xu, zu, xl, zl : ndarray, shape (n_chord + 1,)
+        Chordwise coordinate *x* and height *z* for the upper (u) and lower
+        (l) surfaces, unit chord, index 0 at the LE and index n_chord at the
+        TE.
+    """
+    code = str(code).strip().zfill(4)
+    if len(code) != 4 or not code.isdigit():
+        raise ValueError(f"Expected a 4-digit NACA code, got '{code}'")
+
+    m = int(code[0]) / 100.0
+    p = int(code[1]) / 10.0
+    t = int(code[2:4]) / 100.0
+
+    beta = np.linspace(0.0, np.pi, n_chord + 1)
+    xc = 0.5 * (1.0 - np.cos(beta))
+
+    a4 = -0.1036 if closed_te else -0.1015
+    yt = (t / 0.2) * (
+        0.2969 * np.sqrt(xc)
+        - 0.1260 * xc
+        - 0.3516 * xc**2
+        + 0.2843 * xc**3
+        + a4 * xc**4
+    )
+
+    if m < 1e-10 or p < 1e-10:
+        yc = np.zeros_like(xc)
+        dyc_dx = np.zeros_like(xc)
+    else:
+        fwd = xc <= p
+        yc = np.where(
+            fwd,
+            (m / p**2) * (2.0 * p * xc - xc**2),
+            (m / (1.0 - p)**2) * ((1.0 - 2.0 * p) + 2.0 * p * xc - xc**2),
+        )
+        dyc_dx = np.where(
+            fwd,
+            (2.0 * m / p**2) * (p - xc),
+            (2.0 * m / (1.0 - p)**2) * (p - xc),
+        )
+
+    theta = np.arctan(dyc_dx)
+    xu = xc - yt * np.sin(theta)
+    zu = yc + yt * np.cos(theta)
+    xl = xc + yt * np.sin(theta)
+    zl = yc - yt * np.cos(theta)
+
+    return xu, zu, xl, zl

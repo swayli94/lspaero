@@ -182,15 +182,15 @@ committed. XFOIL overlay omitted (tool not installed); CL vs α plot with
 `Mesh` object.
 
 **Tasks.**
-- [ ] `geometry/mesh.py`: `Mesh` class with invariants and self-check.
-- [ ] `geometry/wing.py`: parametric wing builder:
+- [x] `geometry/mesh.py`: `Mesh` class with invariants and self-check.
+- [x] `geometry/wing.py`: parametric wing builder:
       - cosine spanwise distribution
       - cosine chordwise distribution
       - twist + dihedral + sweep + taper
       - tip cap (closed surface)
       - trailing-edge pair identification
-- [ ] `viz/plot.py`: render mesh with normals as arrows, highlight TE in red.
-- [ ] Mesh validity tests (`tests/test_mesh.py`): watertightness, normal
+- [x] `viz/plot.py`: render mesh with normals as arrows, highlight TE in red.
+- [x] Mesh validity tests (`tests/test_mesh.py`): watertightness, normal
       orientation, TE pairs.
 
 **Verification.**
