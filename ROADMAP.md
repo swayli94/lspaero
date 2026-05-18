@@ -86,15 +86,18 @@ lspaero/
 │       ├── __init__.py
 │       └── plot.py
 ├── examples/
-│   ├── 01_rectangular_vlm.py
-│   ├── 02_swept_flying_wing_vlm.py
-│   ├── 03_thick_flying_wing.py
-│   ├── 04_compressibility.py
-│   ├── 05_stability_derivatives.py
-│   ├── 06_control_surface.py
-│   ├── 07_wake_relaxation.py
-│   ├── 08_sdf_backend.py
-│   └── 09_sdf_perturbation_study.py
+│   ├── 00_2d_airfoil/          # Stage 1: Hess-Smith 2D solver
+│   │   ├── 00_2d_airfoil.py
+│   │   └── *.png
+│   ├── 01_rectangular_vlm/     # Stage 3
+│   ├── 02_swept_flying_wing_vlm/
+│   ├── 03_thick_flying_wing/
+│   ├── 04_compressibility/
+│   ├── 05_stability_derivatives/
+│   ├── 06_control_surface/
+│   ├── 07_wake_relaxation/
+│   ├── 08_sdf_backend/
+│   └── 09_sdf_perturbation_study/
 └── tests/
     ├── test_biot_savart.py
     ├── test_mesh.py
