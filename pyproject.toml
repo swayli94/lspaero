@@ -1,0 +1,19 @@
+[build-system]
+requires = ["setuptools >= 61.0"]
+build-backend = "setuptools.backends.legacy:build"
+
+[project]
+name = "lspaero"
+version = "0.1.0"
+description = "Level-set panel method for flying-wing aerodynamics"
+readme = "README.md"
+license = { text = "MIT" }
+requires-python = ">=3.10"
+dependencies = ["numpy", "scipy", "matplotlib"]
+
+[project.optional-dependencies]
+dev = ["pytest"]
+viz = ["pyvista"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
