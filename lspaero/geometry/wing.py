@@ -35,12 +35,13 @@ def make_wing_mesh(
     airfoil: str = "0012",
     n_span: int = 20,
     n_chord: int = 10,
+    include_tip_cap: bool = False,
 ) -> Mesh:
     """Build a right half-wing thick-panel Mesh.
 
-    The mesh contains upper-surface, lower-surface, and tip-cap panels.  The
-    trailing edge and the root plane are left open for wake shedding and
-    symmetry boundary conditions respectively.
+    The mesh contains upper-surface and lower-surface panels, plus an optional
+    tip-cap.  The trailing edge and root plane are left open for wake shedding
+    and the symmetry image system respectively.
 
     Parameters
     ----------
@@ -63,11 +64,18 @@ def make_wing_mesh(
         Number of spanwise panels (cosine-clustered between root and tip).
     n_chord : int
         Number of chordwise panels per surface (cosine-clustered, LE → TE).
+    include_tip_cap : bool
+        If True, add ``n_chord`` tip-cap panels closing the wing at
+        y = half_span.  Default False: leaving the tip open avoids the
+        closed-body null-space of the vortex-ring AIC and keeps the linear
+        system well-conditioned (κ ~ 10⁴ instead of ~ 10¹⁸).
 
     Returns
     -------
     Mesh
-        Right half-wing mesh with ``n_chord * (2*n_span + 1)`` panels.
+        Right half-wing mesh.  Panel count:
+        ``n_chord * 2 * n_span`` (open tip) or
+        ``n_chord * (2*n_span + 1)`` (with tip cap).
     """
     # ------------------------------------------------------------------ #
     # Spanwise layout — cosine clustering (dense at root and tip)         #
@@ -166,19 +174,24 @@ def make_wing_mesh(
     pt3 = B +  ic      * n_s + n_span
     panels_tip = np.column_stack([pt0, pt1, pt2, pt3])
 
-    panels = np.vstack([panels_upper, panels_lower, panels_tip])
-
-    # ------------------------------------------------------------------ #
-    # Surface IDs                                                         #
-    # ------------------------------------------------------------------ #
-    n_up = len(panels_upper)    # n_chord * n_span
-    n_lo = len(panels_lower)    # n_chord * n_span
-    n_tip = len(panels_tip)     # n_chord
-    surface_id = np.concatenate([
-        np.full(n_up,  SURF_UPPER, dtype=int),
-        np.full(n_lo,  SURF_LOWER, dtype=int),
-        np.full(n_tip, SURF_TIP,   dtype=int),
-    ])
+    if include_tip_cap:
+        panels = np.vstack([panels_upper, panels_lower, panels_tip])
+        n_up   = len(panels_upper)
+        n_lo   = len(panels_lower)
+        n_tip  = len(panels_tip)
+        surface_id = np.concatenate([
+            np.full(n_up,  SURF_UPPER, dtype=int),
+            np.full(n_lo,  SURF_LOWER, dtype=int),
+            np.full(n_tip, SURF_TIP,   dtype=int),
+        ])
+    else:
+        panels = np.vstack([panels_upper, panels_lower])
+        n_up   = len(panels_upper)
+        n_lo   = len(panels_lower)
+        surface_id = np.concatenate([
+            np.full(n_up, SURF_UPPER, dtype=int),
+            np.full(n_lo, SURF_LOWER, dtype=int),
+        ])
 
     # ------------------------------------------------------------------ #
     # Trailing-edge pairs                                                 #

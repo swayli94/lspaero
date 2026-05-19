@@ -104,3 +104,75 @@ def compute_forces(
         "forces": forces,
         "dCL": dCL,
     }
+
+
+def forces_from_cp(
+    mesh,
+    Cp: np.ndarray,
+    V_inf: np.ndarray,
+    rho: float,
+    S_ref: float,
+    b_ref: float,
+    c_ref: float,
+    x_ref: float,
+) -> dict:
+    """Integrate surface pressure to aerodynamic forces and moments.
+
+    The pressure force on a surface element is:
+
+        dF_i = −q · Cp_i · A_i · n̂_i
+
+    where n̂_i is the outward panel normal and q = ½ρV²  (Katz & Plotkin §12.5).
+
+    Parameters
+    ----------
+    mesh : Mesh
+        Thick-surface mesh (provides centroids, normals, areas).
+    Cp : (Np,) float
+        Pressure coefficient on each panel.
+    V_inf : (3,) float
+        Freestream velocity vector.
+    rho : float
+        Air density (kg/m³).
+    S_ref, b_ref, c_ref, x_ref : float
+        Reference area, span, chord, and moment-reference x-coordinate.
+
+    Returns
+    -------
+    dict with keys: CL, CDi, Cm, L, Di, M, forces (Np, 3), Cp (Np,)
+    """
+    V_mag = float(np.linalg.norm(V_inf))
+    q = 0.5 * rho * V_mag ** 2
+    V_hat = V_inf / V_mag
+
+    e_lift = np.array([-V_hat[2], 0.0, V_hat[0]])
+    norm = float(np.linalg.norm(e_lift))
+    if norm > 1e-12:
+        e_lift /= norm
+
+    # Pressure force per panel: dF = -q * Cp * A * n
+    forces = -q * Cp[:, None] * mesh.areas[:, None] * mesh.normals   # (Np, 3)
+    F_total = forces.sum(axis=0)
+
+    L  = float(F_total @ e_lift)
+    Di = float(F_total @ V_hat)
+
+    # Pitching moment (y-axis) about (x_ref, 0, 0)
+    r_ref = mesh.centroids - np.array([x_ref, 0.0, 0.0])
+    moments = np.cross(r_ref, forces)
+    M = float(moments.sum(axis=0)[1])
+
+    CL  = L  / (q * S_ref)
+    CDi = Di / (q * S_ref)
+    Cm  = M  / (q * S_ref * c_ref)
+
+    return {
+        "CL": CL,
+        "CDi": CDi,
+        "Cm": Cm,
+        "L": L,
+        "Di": Di,
+        "M": M,
+        "forces": forces,
+        "Cp": Cp,
+    }
