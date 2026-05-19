@@ -103,37 +103,33 @@ mesh8 = make_vlm_mesh(half_span=HALF_SPAN, root_chord=CHORD, tip_chord=CHORD,
                       n_span=16, n_chord=1)
 res8 = solve_vlm(mesh8, alpha_deg=alpha_plot)
 
-# cp is the 3/4-chord collocation points; extract spanwise midpoints
-cp  = res8["cp"]           # (Np, 3)
-dCL = res8["dCL"]          # (Np,)  per-panel lift / (q * S_ref)
+dCL = res8["dCL"]          # (Np,)  panel lift contribution / (q * S_ref)
 A   = res8["A"]
 B   = res8["B"]
 
 # Spanwise coordinate at bound-vortex midpoint
 y_mid = 0.5 * (A[:, 1] + B[:, 1])   # (Np,)
+dy    = B[:, 1] - A[:, 1]            # (Np,) panel spanwise width
+b2    = HALF_SPAN
+eta   = y_mid / b2
+deta  = dy / b2                       # normalised panel width in η
 
-# For n_chord=1 each spanwise strip has one panel; normalise to strip-CL
-dy   = B[:, 1] - A[:, 1]       # (Np,) strip spanwise width
-b2   = HALF_SPAN
-# Elliptic reference: Gamma(y) = Gamma_0 * sqrt(1 - (y/b2)^2)
-# dCL/d(y/b2) for unit CL → proportional to sqrt(1-(y/b2)^2)
-CL8  = res8["CL"]
-eta  = y_mid / b2
-dCL_per_eta = dCL / (2 / b2)   # scale by strip width
+# Spanwise loading = dCL / dη.  dCL ∝ Γ·Δy so dividing by Δη gives the
+# loading distribution ∝ Γ(y), which peaks at the root for a symmetric wing.
+CL8          = res8["CL"]
+loading      = dCL / deta             # (Np,)  lift per unit η
 
-# Normalise by CL * c_local / c_ref → spanwise loading Gamma/(V*b)
-# For rectangular, just plot raw dCL vs y/b2
-fig, ax = plt.subplots(figsize=(6, 4))
-ax.plot(eta, dCL, "b-o", ms=4, label=f"VLM, α={alpha_plot}°, CL={CL8:.3f}")
-
-# Elliptic reference proportional to sqrt(1-eta^2), normalised to same CL
-eta_ref = np.linspace(0, 1, 200)
+# Elliptic reference: ∝ sqrt(1 - η²), normalised to match VLM at root
+eta_ref      = np.linspace(0, 1, 200)
 elliptic_ref = np.sqrt(np.maximum(1 - eta_ref**2, 0))
-scale = np.trapezoid(dCL, eta) / np.trapezoid(elliptic_ref, eta_ref)
+scale        = loading[0] / elliptic_ref[0]   # match at root (η≈0)
+
+fig, ax = plt.subplots(figsize=(6, 4))
+ax.plot(eta, loading, "b-o", ms=4, label=f"VLM, α={alpha_plot}°, CL={CL8:.3f}")
 ax.plot(eta_ref, elliptic_ref * scale, "k--", lw=1.5, label="Elliptic ref")
 
 ax.set_xlabel("η = y / (b/2)")
-ax.set_ylabel("Panel ΔCL  (per unit η)")
+ax.set_ylabel("Spanwise loading  dCL/dη")
 ax.set_title(f"Spanwise loading  –  AR={AR:.0f} rectangular, α={alpha_plot}°")
 ax.set_xlim(0, 1)
 ax.legend(fontsize=8)

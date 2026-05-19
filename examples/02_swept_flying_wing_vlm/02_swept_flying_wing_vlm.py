@@ -162,32 +162,30 @@ A   = res_load["A"]
 B   = res_load["B"]
 dCL = res_load["dCL"]   # per-panel lift / (q * S_ref)
 
-# Average bound-vortex y for each panel
-y_mid = 0.5 * (A[:, 1] + B[:, 1])   # (Np,)
-CL_load = res_load["CL"]
+# Spanwise coordinate at bound-vortex midpoint
+y_mid    = 0.5 * (A[:, 1] + B[:, 1])   # (Np,)
+dy_panel = B[:, 1] - A[:, 1]            # (Np,) panel widths
+CL_load  = res_load["CL"]
 
-# Spanwise integration: sum over chordwise panels per strip
-# Each panel is already a 1/4-chord bound-vortex segment; with n_chord > 1
-# there are multiple bound segments per spanwise strip.
-# Sort by y and accumulate per strip.
-unique_y = np.unique(np.round(y_mid, 6))
-dCL_strip = np.array([dCL[np.round(y_mid, 6) == yy].sum() for yy in unique_y])
+# Accumulate dCL per spanwise strip (sum over chordwise panels at same y).
+# Then normalise by strip η-width to get spanwise loading dCL/dη ∝ Γ(y).
+unique_y  = np.unique(np.round(y_mid, 6))
+dCL_strip = np.array([dCL[np.round(y_mid, 6) == yy].sum()     for yy in unique_y])
+dy_strip  = np.array([dy_panel[np.round(y_mid, 6) == yy].mean() for yy in unique_y])
 eta_strip = unique_y / HALF_SPAN
+deta      = dy_strip / HALF_SPAN
+loading   = dCL_strip / deta   # spanwise loading dCL/dη, peaks at root
 
-# Elliptic reference: normalised to same total CL
+# Elliptic reference: sqrt(1-η²), matched at root
 elliptic_shape = np.sqrt(np.maximum(1 - eta_strip**2, 0))
-if elliptic_shape.sum() > 0:
-    elliptic_norm = elliptic_shape * (dCL_strip.sum() / elliptic_shape.sum())
-else:
-    elliptic_norm = np.zeros_like(dCL_strip)
+elliptic_ref   = elliptic_shape * (loading[0] / max(elliptic_shape[0], 1e-12))
 
 fig, ax = plt.subplots(figsize=(7, 4))
-ax.bar(eta_strip, dCL_strip, width=np.diff(np.append(eta_strip, 1)) * 0.8,
-       align="edge", alpha=0.6, color="steelblue",
-       label=f"VLM, α={alpha_load}°, CL={CL_load:.3f}")
-ax.plot(eta_strip, elliptic_norm, "k--", lw=1.5, label="Elliptic ref")
+ax.plot(eta_strip, loading,      "b-o", ms=4,
+        label=f"VLM, α={alpha_load}°, CL={CL_load:.3f}")
+ax.plot(eta_strip, elliptic_ref, "k--", lw=1.5, label="Elliptic ref")
 ax.set_xlabel("η = y / (b/2)")
-ax.set_ylabel("Panel ΔCL  (summed chordwise)")
+ax.set_ylabel("Spanwise loading  dCL/dη")
 ax.set_title(f"Spanwise loading  —  swept flying wing, α={alpha_load}°")
 ax.set_xlim(0, 1)
 ax.legend(fontsize=8)
