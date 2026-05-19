@@ -106,12 +106,9 @@ ax.annotate(f"α₀ = {alpha0_deg:.2f}°",
             xy=(alpha0_deg, 0), xytext=(alpha0_deg + 2, 0.2),
             fontsize=8, arrowprops=dict(arrowstyle="->", lw=0.8))
 
-ax = axes[1]
-ax.plot(alphas, np.array(CLs) * np.array(CDis), "k-", lw=0.5, label="")
 CDi_arr = np.array(CDis)
 ax2 = axes[1]
 ax2.plot(CL_arr, CDi_arr, "b-o", ms=4, label="VLM (near-field K-J)")
-# Elliptic reference
 cdi_elliptic = CL_arr**2 / (np.pi * AR_plan)
 ax2.plot(CL_arr, cdi_elliptic, "k--", lw=1.5,
          label=f"Elliptic: CL²/(π·AR)")
