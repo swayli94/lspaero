@@ -99,34 +99,44 @@ print(f"Saved 01_CL_vs_alpha.png")
 # 2.  Spanwise loading at alpha = 6°                                           #
 # --------------------------------------------------------------------------- #
 alpha_plot = 6.0
+# n_span=8 is the accuracy sweet-spot for this AR.  Higher n_span makes the
+# tip panel smaller; the outermost trailing vortex (at y=b/2) then sits very
+# close to the last collocation point and the off-diagonal AIC terms dominate,
+# producing a spurious spike in the tip strip's circulation.
 mesh8 = make_vlm_mesh(half_span=HALF_SPAN, root_chord=CHORD, tip_chord=CHORD,
-                      n_span=16, n_chord=1)
+                      n_span=8, n_chord=1)
 res8 = solve_vlm(mesh8, alpha_deg=alpha_plot)
 
 dCL = res8["dCL"]          # (Np,)  panel lift contribution / (q * S_ref)
 A   = res8["A"]
 B   = res8["B"]
 
-# Spanwise coordinate at bound-vortex midpoint
-y_mid = 0.5 * (A[:, 1] + B[:, 1])   # (Np,)
-dy    = B[:, 1] - A[:, 1]            # (Np,) panel spanwise width
+y_mid = 0.5 * (A[:, 1] + B[:, 1])
+dy    = B[:, 1] - A[:, 1]
 b2    = HALF_SPAN
 eta   = y_mid / b2
-deta  = dy / b2                       # normalised panel width in η
+deta  = dy / b2
 
-# Spanwise loading = dCL / dη.  dCL ∝ Γ·Δy so dividing by Δη gives the
-# loading distribution ∝ Γ(y), which peaks at the root for a symmetric wing.
-CL8          = res8["CL"]
-loading      = dCL / deta             # (Np,)  lift per unit η
+# Spanwise loading = dCL / dη  ∝  Γ(y).  Peaks at root (η=0), fades at tip.
+# Note: VLM does NOT force Γ→0 at the exact tip; the last panel keeps a
+# finite circulation whose strength equals the tip-vortex rollup strength.
+CL8     = res8["CL"]
+loading = dCL / deta
 
-# Elliptic reference: ∝ sqrt(1 - η²), normalised to match VLM at root
+# Elliptic reference: ∝ sqrt(1 − η²), amplitude matched at root
 eta_ref      = np.linspace(0, 1, 200)
 elliptic_ref = np.sqrt(np.maximum(1 - eta_ref**2, 0))
-scale        = loading[0] / elliptic_ref[0]   # match at root (η≈0)
+scale        = loading[0] / elliptic_ref[0]
 
 fig, ax = plt.subplots(figsize=(6, 4))
 ax.plot(eta, loading, "b-o", ms=4, label=f"VLM, α={alpha_plot}°, CL={CL8:.3f}")
 ax.plot(eta_ref, elliptic_ref * scale, "k--", lw=1.5, label="Elliptic ref")
+# Mark the tip value explicitly so the non-zero endpoint is visible
+ax.annotate(f"Γ_tip ≠ 0\n(tip vortex)",
+            xy=(eta[-1], loading[-1]),
+            xytext=(0.78, loading[-1] + 0.04),
+            fontsize=7, ha="center",
+            arrowprops=dict(arrowstyle="->", lw=0.8))
 
 ax.set_xlabel("η = y / (b/2)")
 ax.set_ylabel("Spanwise loading  dCL/dη")

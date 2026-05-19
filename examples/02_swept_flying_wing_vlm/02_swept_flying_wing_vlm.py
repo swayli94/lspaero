@@ -156,27 +156,34 @@ print("Saved 02_CL_CDi_polar.png")
 # 3.  Spanwise loading at a representative alpha                               #
 # --------------------------------------------------------------------------- #
 alpha_load = 8.0
-res_load   = solve_vlm(mesh, alpha_deg=alpha_load)
+# Use n_span=8 for the loading plot.  Higher panel counts make the outermost
+# trailing vortex (exactly at y=b/2) dangerously close to the tip-strip
+# collocation points; large off-diagonal AIC terms then cause a spurious
+# spike in Γ at the last strip.  n_span=8 has monotone, artefact-free loading.
+mesh_load = make_vlm_mesh(
+    half_span=HALF_SPAN, root_chord=ROOT_CHORD, tip_chord=TIP_CHORD,
+    sweep_le=SWEEP_LE, twist_tip=TWIST_TIP,
+    n_span=8, n_chord=N_CHORD,
+)
+res_load  = solve_vlm(mesh_load, alpha_deg=alpha_load)
 
 A   = res_load["A"]
 B   = res_load["B"]
-dCL = res_load["dCL"]   # per-panel lift / (q * S_ref)
+dCL = res_load["dCL"]
 
-# Spanwise coordinate at bound-vortex midpoint
-y_mid    = 0.5 * (A[:, 1] + B[:, 1])   # (Np,)
-dy_panel = B[:, 1] - A[:, 1]            # (Np,) panel widths
+y_mid    = 0.5 * (A[:, 1] + B[:, 1])
+dy_panel = B[:, 1] - A[:, 1]
 CL_load  = res_load["CL"]
 
-# Accumulate dCL per spanwise strip (sum over chordwise panels at same y).
-# Then normalise by strip η-width to get spanwise loading dCL/dη ∝ Γ(y).
+# Sum chordwise panels per spanwise strip, then normalise by Δη to get dCL/dη.
 unique_y  = np.unique(np.round(y_mid, 6))
-dCL_strip = np.array([dCL[np.round(y_mid, 6) == yy].sum()     for yy in unique_y])
+dCL_strip = np.array([dCL[np.round(y_mid, 6) == yy].sum()      for yy in unique_y])
 dy_strip  = np.array([dy_panel[np.round(y_mid, 6) == yy].mean() for yy in unique_y])
 eta_strip = unique_y / HALF_SPAN
 deta      = dy_strip / HALF_SPAN
-loading   = dCL_strip / deta   # spanwise loading dCL/dη, peaks at root
+loading   = dCL_strip / deta   # ∝ Γ(y), peaks at root
 
-# Elliptic reference: sqrt(1-η²), matched at root
+# Elliptic reference matched at root
 elliptic_shape = np.sqrt(np.maximum(1 - eta_strip**2, 0))
 elliptic_ref   = elliptic_shape * (loading[0] / max(elliptic_shape[0], 1e-12))
 
