@@ -149,3 +149,41 @@ def naca4_surfaces(code: str, n_chord: int, closed_te: bool = True):
     zl = yc - yt * np.cos(theta)
 
     return xu, zu, xl, zl
+
+
+def naca4_camber(code: str, n_chord: int):
+    """Mean camber line of a NACA 4-digit airfoil.
+
+    Parameters
+    ----------
+    code : str
+        NACA 4-digit designation.
+    n_chord : int
+        Number of chordwise panels; returns ``n_chord + 1`` nodes.
+
+    Returns
+    -------
+    xc, zc : ndarray, shape (n_chord + 1,)
+        Chordwise coordinate and camber height on a unit chord, cosine-clustered
+        from LE (index 0) to TE (index n_chord).
+    """
+    code = str(code).strip().zfill(4)
+    if len(code) != 4 or not code.isdigit():
+        raise ValueError(f"Expected a 4-digit NACA code, got '{code}'")
+
+    m = int(code[0]) / 100.0
+    p = int(code[1]) / 10.0
+
+    beta = np.linspace(0.0, np.pi, n_chord + 1)
+    xc = 0.5 * (1.0 - np.cos(beta))
+
+    if m < 1e-10 or p < 1e-10:
+        return xc, np.zeros_like(xc)
+
+    fwd = xc <= p
+    zc = np.where(
+        fwd,
+        (m / p**2) * (2.0 * p * xc - xc**2),
+        (m / (1.0 - p)**2) * ((1.0 - 2.0 * p) + 2.0 * p * xc - xc**2),
+    )
+    return xc, zc

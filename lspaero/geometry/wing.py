@@ -17,7 +17,7 @@ from __future__ import annotations
 import numpy as np
 
 from .mesh import Mesh
-from .naca import naca4_surfaces
+from .naca import naca4_camber, naca4_surfaces
 
 # Integer labels stored in Mesh.surface_id
 SURF_UPPER: int = 0
@@ -203,6 +203,94 @@ def make_wing_mesh(
 
     return Mesh(
         vertices=vertices,
+        panels=panels,
+        te_pairs=te_pairs,
+        wake_seed=wake_seed,
+        surface_id=surface_id,
+    )
+
+
+def make_vlm_mesh(
+    half_span: float = 5.0,
+    root_chord: float = 2.0,
+    tip_chord: float = 1.0,
+    sweep_le: float = 0.0,
+    dihedral: float = 0.0,
+    twist_tip: float = 0.0,
+    airfoil: str = "0012",
+    n_span: int = 20,
+    n_chord: int = 10,
+) -> Mesh:
+    """Build a right half-wing VLM mesh on the mean camber surface.
+
+    This mesh is the thin-surface input for the vortex-lattice solver.  Each
+    panel has a single surface (``surface_id = SURF_UPPER = 0``).  The
+    trailing-edge pairs store the same panel index in both columns because there
+    is no thickness distinction on the camber surface.
+
+    Parameters are identical to :func:`make_wing_mesh`.
+
+    Returns
+    -------
+    Mesh
+        Right half-wing camber-surface mesh with ``n_chord * n_span`` panels.
+    """
+    beta_s = np.linspace(0.0, np.pi, n_span + 1)
+    eta = 0.5 * (1.0 - np.cos(beta_s))          # (n_span+1,)
+
+    y_sp = eta * half_span
+    chord = root_chord + (tip_chord - root_chord) * eta
+    x_le = y_sp * np.tan(np.radians(sweep_le))
+    z_le = y_sp * np.tan(np.radians(dihedral))
+    twist = np.radians(twist_tip) * eta
+
+    xc, zc = naca4_camber(airfoil, n_chord)      # (n_chord+1,) unit chord
+
+    n_c = n_chord + 1    # chordwise nodes
+    n_s = n_span + 1     # spanwise nodes
+
+    xc2d = xc[:, None];  zc2d = zc[:, None]      # (n_c, 1)
+    cos_th = np.cos(twist)[None, :]               # (1, n_s)
+    sin_th = np.sin(twist)[None, :]
+    chord2d = chord[None, :]
+    x_le2d  = x_le[None, :]
+    z_le2d  = z_le[None, :]
+
+    x_rot = xc2d * cos_th - zc2d * sin_th        # (n_c, n_s)
+    z_rot = xc2d * sin_th + zc2d * cos_th
+    y_grid = np.broadcast_to(y_sp[None, :], (n_c, n_s))
+
+    verts = np.column_stack([
+        (x_le2d + x_rot * chord2d).ravel(),
+        y_grid.ravel(),
+        (z_le2d + z_rot * chord2d).ravel(),
+    ])   # (n_c * n_s, 3)
+
+    i_c = np.arange(n_chord)
+    j_s = np.arange(n_span)
+    II, JJ = np.meshgrid(i_c, j_s, indexing="ij")
+    II = II.ravel(); JJ = JJ.ravel()
+
+    # v0=fwd-inner, v1=aft-inner, v2=aft-outer, v3=fwd-outer
+    # CCW from above → normal points +z
+    p0 =  II       * n_s +  JJ
+    p1 = (II + 1)  * n_s +  JJ
+    p2 = (II + 1)  * n_s + (JJ + 1)
+    p3 =  II       * n_s + (JJ + 1)
+    panels = np.column_stack([p0, p1, p2, p3])   # (n_chord*n_span, 4)
+
+    surface_id = np.zeros(len(panels), dtype=int)
+
+    j_all = np.arange(n_span)
+    te_idx = (n_chord - 1) * n_span + j_all      # last chordwise row
+    te_pairs = np.column_stack([te_idx, te_idx])  # upper = lower (thin surface)
+
+    te_inner = verts[n_chord * n_s + j_all]
+    te_outer = verts[n_chord * n_s + j_all + 1]
+    wake_seed = 0.5 * (te_inner + te_outer)
+
+    return Mesh(
+        vertices=verts,
         panels=panels,
         te_pairs=te_pairs,
         wake_seed=wake_seed,
