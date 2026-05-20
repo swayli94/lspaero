@@ -277,3 +277,93 @@ def build_panel_aic(
     np.subtract.at(AIC, (slice(None), te_l), wake_AIC)
 
     return AIC, vel_body, wake_vel, A_w, B_w
+
+
+# ---------------------------------------------------------------------------
+# Flexible-wake AIC (for free-wake / wake-relaxation VLM)
+# ---------------------------------------------------------------------------
+
+def build_aic_with_wake(
+    mesh: Mesh,
+    nodes_A: np.ndarray,
+    nodes_B: np.ndarray,
+    d_far: np.ndarray,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    """VLM AIC built with a finite wake node system instead of semi-infinite legs.
+
+    Each horseshoe vortex's trailing legs are replaced by a series of finite
+    vortex segments (one per wake row) plus a single semi-infinite extension
+    from the last row.  When ``nodes_A / nodes_B`` are collinear with
+    ``d_far`` (the initial planar configuration), the result is identical to
+    ``build_aic(mesh, d_far)`` by the Biot–Savart telescoping identity.
+
+    Parameters
+    ----------
+    mesh : Mesh
+        Camber-surface VLM mesh.
+    nodes_A, nodes_B : (n_rows+1, Np, 3)
+        Wake node arrays from ``build_wake_nodes``.  Row 0 must equal A / B
+        from ``_ring_points(mesh)``.
+    d_far : (3,)
+        Far-field direction for the semi-infinite extension from the last row.
+        Typically the freestream unit vector.
+
+    Returns
+    -------
+    AIC : (Np, Np)
+    A, B, cp : (Np, 3)  — bound-vortex geometry for K-J force computation.
+
+    Notes
+    -----
+    Katz & Plotkin §14.2: free-wake horseshoe vortex system.
+    """
+    A, B, cp = _ring_points(mesh)
+    n_rows = nodes_A.shape[0] - 1
+    d = d_far / np.linalg.norm(d_far)
+
+    P  = cp[:, None, :]    # (Np, 1, 3)  collocation points
+
+    # ---- Bound segment ---- #
+    vel = vel_segment(P, A[None, :, :], B[None, :, :])   # (Np, Np, 3)
+
+    # ---- Right trailing legs: B[r] → B[r+1] then semi-infinite ---- #
+    for r in range(n_rows):
+        nB_r  = nodes_B[r,     :, :][None, :, :]   # (1, Np, 3)
+        nB_r1 = nodes_B[r + 1, :, :][None, :, :]
+        vel = vel + vel_segment(P, nB_r, nB_r1)
+    vel = vel + vel_semi_inf(P, nodes_B[-1, :, :][None, :, :], d)
+
+    # ---- Left trailing legs: A[r] → A[r+1] then semi-infinite (minus) ---- #
+    for r in range(n_rows):
+        nA_r  = nodes_A[r,     :, :][None, :, :]
+        nA_r1 = nodes_A[r + 1, :, :][None, :, :]
+        vel = vel - vel_segment(P, nA_r, nA_r1)
+    vel = vel - vel_semi_inf(P, nodes_A[-1, :, :][None, :, :], d)
+
+    # ---- Image system (mirror y → -y, reversed winding for left half-wing) ---- #
+    # Row 0 of nodes equals A / B, so the image bound is automatically correct.
+    nodes_A_img = nodes_A.copy();  nodes_A_img[:, :, 1] *= -1
+    nodes_B_img = nodes_B.copy();  nodes_B_img[:, :, 1] *= -1
+
+    nA0i = nodes_A_img[0, :, :][None, :, :]   # (1, Np, 3) = A'
+    nB0i = nodes_B_img[0, :, :][None, :, :]   # = B'
+
+    # Image bound runs B'→A' (same +y sense on the left half-wing)
+    vel = vel + vel_segment(P, nB0i, nA0i)
+
+    # Image right trailing: from A' (plus sign, toward root)
+    for r in range(n_rows):
+        nAi_r  = nodes_A_img[r,     :, :][None, :, :]
+        nAi_r1 = nodes_A_img[r + 1, :, :][None, :, :]
+        vel = vel + vel_segment(P, nAi_r, nAi_r1)
+    vel = vel + vel_semi_inf(P, nodes_A_img[-1, :, :][None, :, :], d)
+
+    # Image left trailing: from B' (minus sign)
+    for r in range(n_rows):
+        nBi_r  = nodes_B_img[r,     :, :][None, :, :]
+        nBi_r1 = nodes_B_img[r + 1, :, :][None, :, :]
+        vel = vel - vel_segment(P, nBi_r, nBi_r1)
+    vel = vel - vel_semi_inf(P, nodes_B_img[-1, :, :][None, :, :], d)
+
+    AIC = np.einsum("ijk,ik->ij", vel, mesh.normals)
+    return AIC, A, B, cp
