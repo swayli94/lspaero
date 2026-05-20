@@ -37,7 +37,8 @@ Outputs (saved in same directory as this script)
 -------------------------------------------------
 03_CL_vs_alpha.png         — CL(α): thick-panel vs VLM reference
 03_Cp_contour.png          — Surface Cp contour on upper and lower wing
-03_Cp_chordwise.png        — Chordwise Cp at three spanwise stations
+03_Cp_chordwise.png        — Chordwise Cp at three spanwise stations (TP vs VLM)
+03_spanwise_loading.png    — Spanwise loading dCL/dη: thick-panel (Cp-integrated) vs VLM (K-J)
 """
 import os
 import sys
@@ -142,7 +143,9 @@ for ax, pv, Cp_surf, title in [
     cy_full = np.concatenate([-cy, cy])
     Cp_full = np.concatenate([Cp_surf, Cp_surf])
 
-    vmin, vmax = -1.5, 1.5
+    # vmax=1.0 matches the physical Bernoulli upper bound (data clipped in solve_morino);
+    # vmax=1.5 would make the colorbar appear to allow Cp>1 even though no panel does.
+    vmin, vmax = -1.5, 1.0
     sc = ax.scatter(cy_full, cx_full, c=Cp_full, cmap="RdBu_r",
                     vmin=vmin, vmax=vmax, s=8, linewidths=0)
     ax.set_xlabel("Spanwise y (m)")
@@ -207,12 +210,12 @@ for ax, js, label in zip(axes, js_list, js_labels):
     ax.set_title(label)
     ax.legend(fontsize=7)
     ax.grid(True, alpha=0.3)
-    ax.invert_yaxis()
-    # Fix y-limits so the LE singularity spike in VLM doesn't collapse the scale
-    ylo = min(Cp_up_tp.min(), (-dCp_strip / 2).min()) * 1.15
-    ax.set_ylim(max(ylo, -3.5), 1.3)
+    # Aerodynamic convention: suction (negative Cp) at top.
+    # set_ylim(bottom, top) with bottom > top produces the inverted axis directly.
+    ymin = min(Cp_up_tp.min(), (-dCp_strip / 2).min()) * 1.15
+    ax.set_ylim(1.3, max(ymin, -3.5))
 
-axes[0].set_ylabel("Cp  (inverted, suction up)")
+axes[0].set_ylabel("Cp  (suction up)")
 fig.suptitle(
     f"Chordwise Cp — thick panel vs VLM  |  NACA 0012, α = {ALPHA_DESIGN}°"
     f"  (CL = {result['CL']:.3f})\n"
@@ -223,6 +226,67 @@ fig.tight_layout()
 fig.savefig(os.path.join(OUT_DIR, "03_Cp_chordwise.png"), dpi=150)
 plt.close(fig)
 print("Saved 03_Cp_chordwise.png")
+
+# ── Plot 4: Spanwise loading — thick panel (Cp-integrated) vs VLM (K-J) ───
+#
+# VLM dCL/dη: sum the K-J per-panel dCL over chord, then divide by Δη.
+# TP  dCL/dη: sum the Cp-pressure forces (upper + lower) over chord per strip,
+#             project onto the lift direction, then divide by q·S_ref·Δη.
+#
+# Panel layout: index = ic * N_SPAN + js → reshape to (N_CHORD, N_SPAN).
+
+# --- VLM spanwise loading ---
+A_v  = vlm_design["A"]
+B_v  = vlm_design["B"]
+dCL_v_2d = vlm_design["dCL"].reshape(N_CHORD, N_SPAN)
+y_v_2d   = (0.5 * (A_v[:, 1] + B_v[:, 1])).reshape(N_CHORD, N_SPAN)
+dy_v_2d  = (B_v[:, 1] - A_v[:, 1]).reshape(N_CHORD, N_SPAN)
+
+dCL_strip_v = dCL_v_2d.sum(axis=0)       # (N_SPAN,) K-J lift per strip
+y_strip     = y_v_2d.mean(axis=0)        # strip centre y (identical for all ic)
+dy_strip    = dy_v_2d.mean(axis=0)       # spanwise width (identical for all ic)
+eta         = y_strip / HALF_SPAN
+deta        = dy_strip / HALF_SPAN
+load_v      = dCL_strip_v / deta
+
+# --- TP spanwise loading (from Cp-integrated forces) ---
+forces_tp = result["forces"]             # (Np, 3)
+V_inf_tp  = result["V_inf"]
+V_hat     = V_inf_tp / np.linalg.norm(V_inf_tp)
+e_lift    = np.array([-V_hat[2], 0.0, V_hat[0]])
+e_lift   /= max(float(np.linalg.norm(e_lift)), 1e-12)
+q_ref     = 0.5 * 1.225 * 1.0 ** 2      # rho=1.225, V_mag=1
+
+forces_up = forces_tp[:n_up].reshape(N_CHORD, N_SPAN, 3)
+forces_lo = forces_tp[n_up:2 * n_up].reshape(N_CHORD, N_SPAN, 3)
+l_up      = np.einsum("ijk,k->ij", forces_up, e_lift)   # (N_CHORD, N_SPAN)
+l_lo      = np.einsum("ijk,k->ij", forces_lo, e_lift)
+l_strip   = (l_up + l_lo).sum(axis=0)                   # sum over chord
+dCL_strip_tp = l_strip / (q_ref * result["S_ref"])
+load_tp      = dCL_strip_tp / deta
+
+# --- Elliptic reference matched to TP total CL ---
+elliptic = np.sqrt(np.maximum(1.0 - eta ** 2, 0.0))
+scale    = (load_tp * deta).sum() / ((elliptic * deta).sum() + 1e-30)
+load_ell = elliptic * scale
+
+fig, ax = plt.subplots(figsize=(7, 4))
+ax.plot(eta, load_v,   "k--",  lw=1.5, label=f"VLM K-J  (CL={vlm_design['CL']:.3f})")
+ax.plot(eta, load_tp,  "b-o",  ms=4,   label=f"TP Cp-int (CL={result['CL_cp']:.3f})")
+ax.plot(eta, load_ell, "r:",   lw=1.0, label="Elliptic ref")
+ax.set_xlabel("η = y / (b/2)")
+ax.set_ylabel("Spanwise loading  dCL/dη")
+ax.set_title(
+    f"Spanwise loading — swept flying wing, α = {ALPHA_DESIGN}°\n"
+    "VLM (K-J near-field) vs thick-panel (Cp-pressure integration)"
+)
+ax.set_xlim(0.0, 1.0)
+ax.legend(fontsize=9)
+ax.grid(True, alpha=0.3)
+fig.tight_layout()
+fig.savefig(os.path.join(OUT_DIR, "03_spanwise_loading.png"), dpi=150)
+plt.close(fig)
+print("Saved 03_spanwise_loading.png")
 
 # ── Summary ────────────────────────────────────────────────────────────────
 print(f"\n=== Design point α = {ALPHA_DESIGN}° ===")
