@@ -6,12 +6,12 @@ Hess-Smith reference from Stage 1.
 
 Method notes
 ------------
-* VLM on the mean camber surface gives Kutta-Joukowski forces (CL, CDi, Cm).
-* Cp_cam at the 3/4-chord collocation points + ΔCp = 2Γ/(V∞ Δx) is split
-  symmetrically to upper and lower surfaces.
-* Because the VLM uses zero circulation at α = 0 (symmetric airfoil), the
-  thickness-induced Cp at zero lift is absent — only the lifting component is
-  captured.  This limitation is visible in the α = 0° Cp panel below.
+* A 3D Hess-Smith source solve on the thick surface gives thickness Cp on both
+  the upper and lower surface panels, including the suction peak at α = 0°.
+* VLM on the mean camber surface gives Kutta-Joukowski forces (CL, CDi, Cm)
+  and the lifting pressure difference ΔCp = 2Γ/(V∞ Δx) per panel.
+* The two effects are superimposed: Cp_upper = Cp_thickness − ΔCp/2,
+  Cp_lower = Cp_thickness + ΔCp/2.
 
 Outputs (saved in same directory as this script)
 -------------------------------------------------
@@ -131,8 +131,7 @@ for ax, alpha in zip(axes, cp_alphas):
 
 axes[0].set_ylabel("Cp  (inverted, suction up)")
 fig.suptitle(
-    f"NACA 0012 — Thick-panel quasi-2D (AR={int(2*HALF_SPAN/CHORD)}) vs 2D Hess-Smith\n"
-    "(Note: thickness Cp at α = 0° absent in thick-panel — lifting component only)",
+    f"NACA 0012 — Thick-panel quasi-2D (AR={int(2*HALF_SPAN/CHORD)}) vs 2D Hess-Smith",
     fontsize=10,
 )
 fig.tight_layout()

@@ -6,19 +6,20 @@ surface Cp on a thick (upper + lower surface) wing mesh.
 
 Algorithm
 ---------
-1. **VLM on the mean camber surface** (vertex-averaged from the thick mesh):
+1. **Hess-Smith source solve on the thick surface**:
+   Solves AIC_σ · σ = −(V_∞ · n̂) for source strengths that enforce zero
+   normal velocity.  Tangential surface velocity → Cp_thickness on each panel.
+   The self-panel normal singularity is removed by projecting out the normal
+   component: Cp = 1 − |V_t|²/V_∞² where V_t = V − (V·n̂)n̂.
+
+2. **VLM on the mean camber surface** (vertex-averaged from the thick mesh):
    Solves for panel circulations Γ and computes Kutta-Joukowski lift, induced
    drag, and pitching moment.  This is the *primary* force output.
+   Also provides ΔCp_j = 2Γ_j / (V_∞ Δx_j) per camber panel.
 
-2. **Camber-surface Cp** at the VLM 3/4-chord collocation points:
-   The total velocity V_∞ + V_induced is evaluated at these points (where the
-   BC guarantees zero normal flow, so the velocity is purely tangential and
-   well-conditioned).  Cp_cam = 1 − |V|²/V_∞².
-
-3. **Pressure split** to upper / lower surfaces:
-   ΔCp_j = 2Γ_j / (V_∞ Δx_j)  [thin-airfoil Kutta-Joukowski approximation]
-   Cp_upper = Cp_cam − ΔCp/2   (suction)
-   Cp_lower = Cp_cam + ΔCp/2   (pressure)
+3. **Superimpose** thickness and lifting effects:
+   Cp_upper[j] = Cp_thickness_upper[j] − ΔCp_j / 2   (suction)
+   Cp_lower[j] = Cp_thickness_lower[j] + ΔCp_j / 2   (pressure)
 
 This module also retains helpers for the potential-form Morino BIE
 (doublet/source AIC builders, wake Kutta embedding) that were used during
@@ -311,14 +312,14 @@ def solve_morino(
 ) -> dict:
     """Thick-surface aerodynamics: Hess-Smith thickness + VLM lifting effect.
 
-    Combines two complementary solves that each avoid the limitations of the
-    full Morino BIE on thin wings:
+    Combines two complementary solves:
 
     (A) **Hess-Smith source solve** on the actual thick surface → thickness Cp.
-        Solves AIC_source · σ = −(V_∞ · n̂) for the source strengths that
-        enforce zero normal velocity.  Surface velocity and Cp are then
-        computed from the resulting source field (plus the V_∞ correction that
-        maps the interior-limit self-term to the exterior limit).
+        Solves AIC_σ · σ = −(V_∞ · n̂) for the source strengths that enforce
+        zero normal velocity due to thickness alone.  The tangential surface
+        velocity is extracted and Cp_thickness computed separately for the upper
+        and lower surface panels.  The self-panel normal singularity is removed
+        by projecting out the normal component before computing |V_t|².
 
     (B) **VLM solve** on the mean camber surface → Kutta-Joukowski lift and
         the panel pressure difference ΔCp_j = 2Γ_j / (V_∞ · Δx_j) per panel.
@@ -326,10 +327,6 @@ def solve_morino(
     The two effects are superimposed:
         Cp_upper[j] = Cp_thickness_upper[j] − ΔCp_j / 2  (suction)
         Cp_lower[j] = Cp_thickness_lower[j] + ΔCp_j / 2  (pressure)
-
-    This avoids the near-singularity that arises when evaluating the VLM
-    horseshoe velocity field at actual surface centroids (which lie very close
-    to the bound-vortex filaments for cosine-clustered LE panels).
 
     Primary forces (CL, CDi, Cm) come from the VLM K-J integration — the most
     accurate estimate for a thin-wing VLM configuration.  The Cp-integrated
@@ -358,7 +355,6 @@ def solve_morino(
         V_inf (3,), wake_dir (3,), S_ref, b_ref, c_ref.
     """
     from .solve import solve_vlm
-    from .influence import induced_velocity_at
 
     alpha = np.radians(alpha_deg)
     beta  = np.radians(beta_deg)
@@ -413,18 +409,25 @@ def solve_morino(
     )
 
     # ------------------------------------------------------------------ #
-    # 3. Camber-surface Cp at the VLM 3/4-chord collocation points        #
+    # 3. Hess-Smith source solve on thick surface → thickness Cp          #
     #                                                                     #
-    # At these points the BC enforces (V_∞ + V_induced) · n̂ = 0, so     #
-    # the velocity is purely tangential and |V|² is well-conditioned.    #
-    # This avoids the near-singularity that arises when evaluating        #
-    # horseshoe velocity at actual surface centroids (which lie very      #
-    # close to bound-vortex filaments for LE-clustered panels).           #
+    # We solve at α = 0° to get the pure-thickness symmetric Cp.         #
+    # Solving at the actual α would embed the stagnation-point shift      #
+    # (a lifting effect) into σ, which then double-counts the VLM ΔCp.  #
+    # Linear superposition: Cp = Cp_thickness(α=0) + Cp_lifting(α).     #
     # ------------------------------------------------------------------ #
-    cp_pts = vlm["cp"]                                  # (Np_cam, 3) 3/4-chord pts
-    V_ind  = induced_velocity_at(cp_pts, vlm["A"], vlm["B"], vlm["Gamma"], wake_dir)
-    V_surf_cam = V_inf[None, :] + V_ind                 # (Np_cam, 3), V_n ≈ 0
-    Cp_cam = 1.0 - np.einsum("ij,ij->i", V_surf_cam, V_surf_cam) / V_mag ** 2
+    from .source_aic import build_source_aic, source_velocity_field
+
+    V_inf_0  = V_mag * np.array([1.0, 0.0, 0.0])       # freestream at α=0
+    AIC_src  = build_source_aic(mesh)
+    rhs_src  = -(V_inf_0 @ mesh.normals.T)              # (Np,)
+    sigma    = np.linalg.solve(AIC_src, rhs_src)        # (Np,)
+
+    V_src    = source_velocity_field(mesh, sigma, mesh.centroids)  # (Np, 3)
+    V_thk    = V_inf_0[None, :] + V_src                # (Np, 3)  α=0 total velocity
+    V_n_thk  = np.einsum("ij,ij->i", V_thk, mesh.normals)         # (Np,) normal component
+    Vt_sq    = np.einsum("ij,ij->i", V_thk, V_thk) - V_n_thk**2  # tangential speed²
+    Cp_thickness = 1.0 - Vt_sq / V_mag**2              # (Np,) symmetric thickness Cp
 
     # ------------------------------------------------------------------ #
     # 4. Lifting pressure difference from K-J                             #
@@ -432,27 +435,28 @@ def solve_morino(
     # ΔCp_j = (p_lower − p_upper)/q = 2Γ_j / (V_∞ · Δx_j)              #
     # where Δx_j ≈ panel area / spanwise bound-vortex length |B−A|.      #
     # ------------------------------------------------------------------ #
-    span_len = np.maximum(np.linalg.norm(vlm["B"] - vlm["A"], axis=-1), 1e-12)
+    span_len  = np.maximum(np.linalg.norm(vlm["B"] - vlm["A"], axis=-1), 1e-12)
     chord_len = cam_mesh.areas / span_len               # (Np_cam,) chord widths
-    dCp = 2.0 * vlm["Gamma"] / (V_mag * chord_len)     # (Np_cam,) pressure diff
+    dCp       = 2.0 * vlm["Gamma"] / (V_mag * chord_len)  # (Np_cam,) pressure diff
 
     # ------------------------------------------------------------------ #
-    # 5. Upper/lower Cp: superimpose camber Cp and lifting ΔCp            #
+    # 5. Upper/lower Cp: superimpose thickness Cp and lifting ΔCp         #
     #                                                                     #
     # Camber panel j maps to: upper panel j, lower panel j + n_up.       #
     # (Same ordered layout from make_wing_mesh and make_vlm_mesh.)        #
     # ------------------------------------------------------------------ #
     Cp = np.zeros(mesh.n_panels)
-    Cp[:n_up]         = Cp_cam - 0.5 * dCp   # upper surface: suction
-    Cp[n_up:2 * n_up] = Cp_cam + 0.5 * dCp   # lower surface: pressure
+    Cp[:n_up]         = Cp_thickness[:n_up]         - 0.5 * dCp   # upper: suction
+    Cp[n_up:2 * n_up] = Cp_thickness[n_up:2 * n_up] + 0.5 * dCp  # lower: pressure
+    # VLM thin-airfoil LE singularity can push lower-surface Cp above 1 when
+    # cosine-clustered panels make chord_len tiny.  Incompressible Bernoulli
+    # (V ≥ 0) is a hard physical upper bound.
+    np.clip(Cp, -np.inf, 1.0, out=Cp)
 
     # ------------------------------------------------------------------ #
     # 6. Secondary Cp-based force integration (cross-check)               #
     # ------------------------------------------------------------------ #
     cp_forces = forces_from_cp(mesh, Cp, V_inf, rho, S_ref, b_ref, c_ref, x_ref)
-
-    # Replicate camber velocity to both upper and lower for return value
-    V_surface = np.vstack([V_surf_cam, V_surf_cam])     # (2*n_up, 3) placeholder
 
     return {
         # Primary aerodynamic coefficients (VLM K-J — accurate)
@@ -467,18 +471,18 @@ def solve_morino(
         "CDi_cp": cp_forces["CDi"],
         "Cm_cp":  cp_forces["Cm"],
         # Field data
-        "Cp":       Cp,
-        "forces":   cp_forces["forces"],
-        "V_surface": V_surface,
-        "sigma":    V_inf @ mesh.normals.T,   # basic transpiration (informational)
-        "Gamma":    vlm["Gamma"],
-        "A":        vlm["A"],
-        "B":        vlm["B"],
-        "V_inf":    V_inf,
-        "wake_dir": wake_dir,
-        "S_ref":    S_ref,
-        "b_ref":    b_ref,
-        "c_ref":    c_ref,
+        "Cp":        Cp,
+        "forces":    cp_forces["forces"],
+        "V_surface": V_thk,              # (2*n_up, 3) α=0 thickness surface velocity
+        "sigma":     sigma,              # (Np,) source strengths from H-S solve
+        "Gamma":     vlm["Gamma"],
+        "A":         vlm["A"],
+        "B":         vlm["B"],
+        "V_inf":     V_inf,
+        "wake_dir":  wake_dir,
+        "S_ref":     S_ref,
+        "b_ref":     b_ref,
+        "c_ref":     c_ref,
     }
 
 

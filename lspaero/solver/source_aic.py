@@ -63,10 +63,10 @@ def _hess_smith_vel(
         r_k  = np.maximum(r_k,  1e-14)
         r_k1 = np.maximum(r_k1, 1e-14)
 
-        # Logarithmic term (in-plane)
+        # Logarithmic term (in-plane): F = log((r+r'+d)/(r+r'-d)) > 0
         numer = np.maximum(np.abs(r_k + r_k1 - d), 1e-30)
         denom = r_k + r_k1 + d
-        F_k   = np.log(numer / denom)
+        F_k   = np.log(denom / numer)
 
         vel_u += (dy / d) * F_k
         vel_v -= (dx / d) * F_k
