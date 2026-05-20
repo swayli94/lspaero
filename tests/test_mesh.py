@@ -145,7 +145,9 @@ def test_te_pairs_lower_is_lower(rect_mesh):
 
 def test_panel_count(rect_mesh):
     n_chord, n_span = 8, 12
-    expected = n_chord * (2 * n_span + 1)
+    # Fixture uses include_tip_cap=False (default): upper + lower only.
+    # With tip cap the count would be n_chord * (2*n_span + 1).
+    expected = n_chord * 2 * n_span
     assert rect_mesh.n_panels == expected
 
 
