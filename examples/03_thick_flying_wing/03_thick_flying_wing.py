@@ -13,20 +13,25 @@ AR        : ≈ 6.25
 
 Method
 ------
-solve_morino combines two solves to produce both accurate global forces and
+solve_morino combines two solves to produce accurate global forces and
 physically correct surface Cp distributions:
 
-  (A) VLM on the mean camber surface (vertex-averaged from upper/lower)
-      → Kutta-Joukowski forces:  CL, CDi, Cm  (primary output)
+  (A) Hess-Smith source solve on the thick surface at α = 0°
+      → pure thickness Cp (symmetric, no lift).
+      Solves AIC_σ · σ = −(V∞_0 · n̂) with V∞_0 along x-axis.
+      Tangential surface velocity → Cp_thickness on each panel.
+      Using α = 0° avoids embedding the stagnation-point shift into σ,
+      which would double-count with the VLM lifting ΔCp.
 
-  (B) At each VLM collocation point (3/4-chord of each camber panel) the
-      total velocity is V_∞ + V_induced.  This gives Cp on the camber:
-          Cp_cam = 1 − |V_inf + V_ind|² / V_∞²
-      The pressure difference from circulation:
-          ΔCp_j = 2Γ_j / (V_∞ Δx_j)      (thin-airfoil K-J approximation)
-      is split symmetrically to give separate upper/lower Cp:
-          Cp_upper = Cp_cam − ΔCp/2   (suction)
-          Cp_lower = Cp_cam + ΔCp/2   (pressure)
+  (B) VLM on the mean camber surface (vertex-averaged from upper/lower)
+      → Kutta-Joukowski forces: CL, CDi, Cm  (primary output).
+      The pressure difference from bound circulation:
+          ΔCp_j = 2Γ_j / (V_∞ · Δx_j)    (thin-airfoil K-J)
+
+  (C) Superimpose thickness and lifting effects; clip to Cp ≤ 1
+      (Bernoulli hard bound in incompressible flow):
+          Cp_upper = Cp_thickness − ΔCp / 2   (suction)
+          Cp_lower = Cp_thickness + ΔCp / 2   (pressure, ≤ 1)
 
 Outputs (saved in same directory as this script)
 -------------------------------------------------

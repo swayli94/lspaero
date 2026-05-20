@@ -12,11 +12,16 @@ Run from the repo root:
     python examples/stage2_mesh/stage2_mesh.py
 """
 
+import os
+import sys
 from pathlib import Path
+
 import numpy as np
 import matplotlib
 matplotlib.use("Agg")          # headless — saves to file instead of screen
 import matplotlib.pyplot as plt
+
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), "../.."))
 
 from lspaero.geometry.wing import make_wing_mesh, SURF_UPPER, SURF_LOWER, SURF_TIP
 from lspaero.viz import plot_mesh, save_vtk
