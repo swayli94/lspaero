@@ -101,6 +101,13 @@ ALPHA_DESIGN = 5.0
 result = solve_morino(thick_mesh, alpha_deg=ALPHA_DESIGN)
 Cp     = result["Cp"]           # (Np,)  upper panels first
 
+# VLM thin-airfoil reference at the same design point
+vlm_design  = solve_vlm(vlm_mesh, alpha_deg=ALPHA_DESIGN)
+span_len_v  = np.maximum(np.linalg.norm(vlm_design["B"] - vlm_design["A"], axis=-1), 1e-12)
+chord_len_v = vlm_mesh.areas / span_len_v           # (N_cam,) local chord per panel
+dCp_vlm     = 2.0 * vlm_design["Gamma"] / (1.0 * chord_len_v)   # (N_cam,) ΔCp = Cp_lo − Cp_up  (V_mag=1)
+x_cam       = vlm_mesh.centroids[:, 0]              # chordwise positions of VLM panels
+
 # ── Plot 1: CL vs alpha ────────────────────────────────────────────────────
 fig, ax = plt.subplots(figsize=(6, 4))
 ax.plot(alphas, CL_vlm,   "k--", label="VLM (camber surface)", linewidth=1.5)
@@ -151,39 +158,66 @@ fig.savefig(os.path.join(OUT_DIR, "03_Cp_contour.png"), dpi=150)
 plt.close(fig)
 print("Saved 03_Cp_contour.png")
 
-# ── Plot 3: Chordwise Cp at three spanwise stations ────────────────────────
+# ── Plot 3: Chordwise Cp — thick panel vs VLM at three spanwise stations ──
+#
+# Thick panel (TP, solid):
+#   Cp_upper = Cp_thickness(α=0°) − ΔCp/2   (blue, circles)
+#   Cp_lower = Cp_thickness(α=0°) + ΔCp/2   (red,  squares), clipped at 1
+#
+# VLM thin-airfoil (dashed):
+#   Cp_upper_vlm = −ΔCp_vlm/2               (blue dashed)   ← pure lifting, no thickness
+#   Cp_lower_vlm = +ΔCp_vlm/2               (red  dashed)
+#
+# The vertical gap between upper and lower lines is ΔCp; comparing the two
+# methods shows how thickness shifts the mean Cp level (TP sits above VLM).
+# Near the LE, VLM has the thin-airfoil singularity (ΔCp→∞); TP clips this.
 js_list   = [0, N_SPAN // 2, N_SPAN - 2]
-js_labels = ["Root (js=0)", f"Mid-span (js={N_SPAN//2})", f"Near-tip (js={N_SPAN-2})"]
-colors    = ["b", "g", "r"]
+js_labels = ["Root", f"Mid-span", f"Near-tip"]
 
-fig, axes = plt.subplots(1, 3, figsize=(13, 4), sharey=True)
+fig, axes = plt.subplots(1, 3, figsize=(13, 4))
 
-for ax, js, label, color in zip(axes, js_list, js_labels, colors):
-    x_vals   = []
-    Cp_upper = []
-    Cp_lower = []
+for ax, js, label in zip(axes, js_list, js_labels):
+    x_tp, Cp_up_tp, Cp_lo_tp = [], [], []
+    x_vl, dCp_strip           = [], []
+
     for ic in range(n_chord):
-        up_idx = ic * n_span + js
-        lo_idx = n_up + up_idx
-        x = thick_mesh.centroids[up_idx, 0]
-        x_vals.append(x)
-        Cp_upper.append(Cp[up_idx])
-        Cp_lower.append(Cp[lo_idx])
+        idx    = ic * n_span + js
+        x_tp.append(thick_mesh.centroids[idx, 0])
+        Cp_up_tp.append(Cp[idx])
+        Cp_lo_tp.append(Cp[n_up + idx])
+        x_vl.append(x_cam[idx])
+        dCp_strip.append(dCp_vlm[idx])
 
-    ax.plot(x_vals, Cp_upper, f"{color}-o", label="Upper", markersize=4)
-    ax.plot(x_vals, Cp_lower, f"{color}--s", label="Lower", markersize=4)
-    ax.axhline(0, color="k", linewidth=0.6, linestyle=":")
+    x_tp      = np.array(x_tp)
+    Cp_up_tp  = np.array(Cp_up_tp)
+    Cp_lo_tp  = np.array(Cp_lo_tp)
+    x_vl      = np.array(x_vl)
+    dCp_strip = np.array(dCp_strip)
+
+    # Thick panel — upper and lower
+    ax.plot(x_tp, Cp_up_tp, "b-o",  ms=4, lw=1.5, label="TP upper")
+    ax.plot(x_tp, Cp_lo_tp, "r-s",  ms=4, lw=1.5, label="TP lower")
+    # VLM thin-airfoil — centred at 0 (no thickness Cp)
+    ax.plot(x_vl, -dCp_strip / 2, "b--", lw=1.2, label="VLM upper (−ΔCp/2)")
+    ax.plot(x_vl, +dCp_strip / 2, "r--", lw=1.2, label="VLM lower (+ΔCp/2)")
+
+    ax.axhline(0, color="k", lw=0.5, ls=":")
+    ax.axhline(1, color="gray", lw=0.5, ls=":")   # stagnation Cp limit
     ax.set_xlabel("Chordwise x (m)")
-    ax.set_title(f"{label}")
-    ax.legend(fontsize=8)
+    ax.set_title(label)
+    ax.legend(fontsize=7)
     ax.grid(True, alpha=0.3)
     ax.invert_yaxis()
+    # Fix y-limits so the LE singularity spike in VLM doesn't collapse the scale
+    ylo = min(Cp_up_tp.min(), (-dCp_strip / 2).min()) * 1.15
+    ax.set_ylim(max(ylo, -3.5), 1.3)
 
-axes[0].set_ylabel("Cp  (inverted axis)")
+axes[0].set_ylabel("Cp  (inverted, suction up)")
 fig.suptitle(
-    f"Chordwise Cp distribution  —  NACA 0012, α = {ALPHA_DESIGN}°  "
-    f"(CL = {result['CL']:.3f})",
-    fontsize=11,
+    f"Chordwise Cp — thick panel vs VLM  |  NACA 0012, α = {ALPHA_DESIGN}°"
+    f"  (CL = {result['CL']:.3f})\n"
+    "Solid: TP (thickness + lift, Cp ≤ 1).  Dashed: VLM thin-airfoil (lift only, Cp centred at 0).",
+    fontsize=9,
 )
 fig.tight_layout()
 fig.savefig(os.path.join(OUT_DIR, "03_Cp_chordwise.png"), dpi=150)
@@ -198,3 +232,4 @@ print(f"  Cm   (VLM K-J)     = {result['Cm']:.4f}")
 print(f"  CL   (Cp integral) = {result['CL_cp']:.4f}")
 print(f"  Cp_upper min/max   = {Cp[:n_up].min():.3f} / {Cp[:n_up].max():.3f}")
 print(f"  Cp_lower min/max   = {Cp[n_up:].min():.3f} / {Cp[n_up:].max():.3f}")
+print(f"  VLM ΔCp range      = {dCp_vlm.min():.3f} .. {dCp_vlm.max():.3f}")
