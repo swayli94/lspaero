@@ -304,6 +304,7 @@ def solve_morino(
     beta_deg: float = 0.0,
     V_mag: float = 1.0,
     rho: float = 1.225,
+    mach: float = 0.0,
     S_ref: float | None = None,
     b_ref: float | None = None,
     c_ref: float | None = None,
@@ -339,6 +340,12 @@ def solve_morino(
     beta_deg  : Sideslip in degrees.
     V_mag     : Freestream speed.
     rho       : Air density (kg/m³).
+    mach      : Freestream Mach number (0 ≤ M < 1).  0 = incompressible.
+                Prandtl-Glauert correction is applied when mach > 0: the mesh
+                is stretched in x by 1/β and the incompressible sub-solves run
+                on the transformed geometry.  Physical reference quantities
+                (S_ref, b_ref, c_ref) are taken from the original mesh.
+                Cp is scaled by 1/β; K-J forces are already corrected.
     S_ref     : Reference area (upper-surface panel area if None).
     b_ref     : Reference span (2 · max y if None).
     c_ref     : Reference chord (S_ref / (0.5 · b_ref) if None).
@@ -348,11 +355,11 @@ def solve_morino(
     Returns
     -------
     dict
-        CL, CDi, Cm, L, Di, M  — primary forces from VLM K-J.
+        CL, CDi, Cm, L, Di, M  — primary forces from VLM K-J (PG-corrected).
         CL_cp, CDi_cp, Cm_cp   — secondary forces from Cp integration.
         Cp (Np,), V_surface (Np, 3), sigma (Np,)
         Gamma (Np_cam,), A (Np_cam, 3), B (Np_cam, 3)
-        V_inf (3,), wake_dir (3,), S_ref, b_ref, c_ref.
+        V_inf (3,), wake_dir (3,), S_ref, b_ref, c_ref, mach, beta.
     """
     from .solve import solve_vlm
 
@@ -365,6 +372,7 @@ def solve_morino(
     ])
     wake_dir = V_inf / np.linalg.norm(V_inf)
 
+    # Reference quantities from PHYSICAL (pre-PG) mesh
     if S_ref is None:
         S_ref = float(mesh.areas[mesh.surface_id == 0].sum())
     if b_ref is None:
@@ -374,27 +382,38 @@ def solve_morino(
     if x_ref is None:
         x_ref = 0.25 * c_ref
 
-    # ------------------------------------------------------------------ #
-    # 1. Mean camber surface from thick mesh (vertex average)             #
-    # ------------------------------------------------------------------ #
-    n_up   = int((mesh.surface_id == 0).sum())
-    off_lo = int(np.min(mesh.panels[mesh.surface_id == 1]))
+    # Prandtl-Glauert: stretch the thick mesh (and later the cam mesh) in x.
+    pg = 1.0
+    solve_thick = mesh
+    if mach > 1e-6:
+        from ..physics.pg_correction import pg_stretch_mesh
+        solve_thick, pg = pg_stretch_mesh(mesh, mach)
 
-    cam_vertices = 0.5 * (mesh.vertices[:off_lo] + mesh.vertices[off_lo:2 * off_lo])
-    cam_panels   = mesh.panels[mesh.surface_id == 0].copy()   # refs [0, off_lo)
-    te_u_idx     = mesh.te_pairs[:, 0]
+    # ------------------------------------------------------------------ #
+    # 1. Mean camber surface from the (possibly PG-stretched) thick mesh  #
+    # ------------------------------------------------------------------ #
+    n_up   = int((solve_thick.surface_id == 0).sum())
+    off_lo = int(np.min(solve_thick.panels[solve_thick.surface_id == 1]))
+
+    cam_vertices = 0.5 * (
+        solve_thick.vertices[:off_lo] + solve_thick.vertices[off_lo:2 * off_lo]
+    )
+    cam_panels   = solve_thick.panels[solve_thick.surface_id == 0].copy()
+    te_u_idx     = solve_thick.te_pairs[:, 0]
     cam_te_pairs = np.column_stack([te_u_idx, te_u_idx])
 
     cam_mesh = Mesh(
         vertices=cam_vertices,
         panels=cam_panels,
         te_pairs=cam_te_pairs,
-        wake_seed=mesh.wake_seed,
+        wake_seed=solve_thick.wake_seed,
         surface_id=np.zeros(n_up, dtype=int),
     )
 
     # ------------------------------------------------------------------ #
     # 2. VLM solve on camber mesh → Γ, K-J forces, collocation points    #
+    # PG is already embedded via solve_thick/cam_mesh; x_ref must be     #
+    # scaled to stretched coordinates for correct moment computation.    #
     # ------------------------------------------------------------------ #
     vlm = solve_vlm(
         cam_mesh,
@@ -405,7 +424,7 @@ def solve_morino(
         S_ref=S_ref,
         b_ref=b_ref,
         c_ref=c_ref,
-        x_ref=x_ref,
+        x_ref=x_ref / pg,   # moment reference in stretched coordinates
     )
 
     # ------------------------------------------------------------------ #
@@ -418,16 +437,16 @@ def solve_morino(
     # ------------------------------------------------------------------ #
     from .source_aic import build_source_aic, source_velocity_field
 
-    V_inf_0  = V_mag * np.array([1.0, 0.0, 0.0])       # freestream at α=0
-    AIC_src  = build_source_aic(mesh)
-    rhs_src  = -(V_inf_0 @ mesh.normals.T)              # (Np,)
-    sigma    = np.linalg.solve(AIC_src, rhs_src)        # (Np,)
+    V_inf_0  = V_mag * np.array([1.0, 0.0, 0.0])         # freestream at α=0
+    AIC_src  = build_source_aic(solve_thick)
+    rhs_src  = -(V_inf_0 @ solve_thick.normals.T)         # (Np,)
+    sigma    = np.linalg.solve(AIC_src, rhs_src)          # (Np,)
 
-    V_src    = source_velocity_field(mesh, sigma, mesh.centroids)  # (Np, 3)
-    V_thk    = V_inf_0[None, :] + V_src                # (Np, 3)  α=0 total velocity
-    V_n_thk  = np.einsum("ij,ij->i", V_thk, mesh.normals)         # (Np,) normal component
-    Vt_sq    = np.einsum("ij,ij->i", V_thk, V_thk) - V_n_thk**2  # tangential speed²
-    Cp_thickness = 1.0 - Vt_sq / V_mag**2              # (Np,) symmetric thickness Cp
+    V_src    = source_velocity_field(solve_thick, sigma, solve_thick.centroids)
+    V_thk    = V_inf_0[None, :] + V_src                   # (Np, 3) α=0 total velocity
+    V_n_thk  = np.einsum("ij,ij->i", V_thk, solve_thick.normals)
+    Vt_sq    = np.einsum("ij,ij->i", V_thk, V_thk) - V_n_thk**2
+    Cp_thickness = 1.0 - Vt_sq / V_mag**2                 # (Np,) symmetric thickness Cp
 
     # ------------------------------------------------------------------ #
     # 4. Lifting pressure difference from K-J                             #
@@ -436,30 +455,31 @@ def solve_morino(
     # where Δx_j ≈ panel area / spanwise bound-vortex length |B−A|.      #
     # ------------------------------------------------------------------ #
     span_len  = np.maximum(np.linalg.norm(vlm["B"] - vlm["A"], axis=-1), 1e-12)
-    chord_len = cam_mesh.areas / span_len               # (Np_cam,) chord widths
+    chord_len = cam_mesh.areas / span_len                  # (Np_cam,) chord widths
     dCp       = 2.0 * vlm["Gamma"] / (V_mag * chord_len)  # (Np_cam,) pressure diff
 
     # ------------------------------------------------------------------ #
     # 5. Upper/lower Cp: superimpose thickness Cp and lifting ΔCp         #
-    #                                                                     #
-    # Camber panel j maps to: upper panel j, lower panel j + n_up.       #
-    # (Same ordered layout from make_wing_mesh and make_vlm_mesh.)        #
     # ------------------------------------------------------------------ #
-    Cp = np.zeros(mesh.n_panels)
-    Cp[:n_up]         = Cp_thickness[:n_up]         - 0.5 * dCp   # upper: suction
-    Cp[n_up:2 * n_up] = Cp_thickness[n_up:2 * n_up] + 0.5 * dCp  # lower: pressure
-    # VLM thin-airfoil LE singularity can push lower-surface Cp above 1 when
-    # cosine-clustered panels make chord_len tiny.  Incompressible Bernoulli
-    # (V ≥ 0) is a hard physical upper bound.
+    Cp = np.zeros(solve_thick.n_panels)
+    Cp[:n_up]         = Cp_thickness[:n_up]         - 0.5 * dCp
+    Cp[n_up:2 * n_up] = Cp_thickness[n_up:2 * n_up] + 0.5 * dCp
     np.clip(Cp, -np.inf, 1.0, out=Cp)
+
+    # Prandtl-Glauert: divide Cp by β to recover physical (compressible) Cp.
+    # K-J forces already equal Cp_incomp / β when normalised by physical S_ref,
+    # so no additional scaling is needed for CL/CDi/Cm.
+    if pg < 1.0 - 1e-12:
+        Cp /= pg
 
     # ------------------------------------------------------------------ #
     # 6. Secondary Cp-based force integration (cross-check)               #
+    # Uses physical mesh normals and areas for correct pressure force.    #
     # ------------------------------------------------------------------ #
     cp_forces = forces_from_cp(mesh, Cp, V_inf, rho, S_ref, b_ref, c_ref, x_ref)
 
     return {
-        # Primary aerodynamic coefficients (VLM K-J — accurate)
+        # Primary aerodynamic coefficients (VLM K-J — PG-corrected)
         "CL":   vlm["CL"],
         "CDi":  vlm["CDi"],
         "Cm":   vlm["Cm"],
@@ -473,8 +493,8 @@ def solve_morino(
         # Field data
         "Cp":        Cp,
         "forces":    cp_forces["forces"],
-        "V_surface": V_thk,              # (2*n_up, 3) α=0 thickness surface velocity
-        "sigma":     sigma,              # (Np,) source strengths from H-S solve
+        "V_surface": V_thk,              # α=0 thickness surface velocity (on solve_thick)
+        "sigma":     sigma,              # source strengths from H-S solve
         "Gamma":     vlm["Gamma"],
         "A":         vlm["A"],
         "B":         vlm["B"],
@@ -483,6 +503,8 @@ def solve_morino(
         "S_ref":     S_ref,
         "b_ref":     b_ref,
         "c_ref":     c_ref,
+        "mach":      mach,
+        "beta":      pg,
     }
 
 

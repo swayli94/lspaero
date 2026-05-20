@@ -28,6 +28,7 @@ def solve_vlm(
     beta_deg: float = 0.0,
     V_mag: float = 1.0,
     rho: float = 1.225,
+    mach: float = 0.0,
     S_ref: float | None = None,
     b_ref: float | None = None,
     c_ref: float | None = None,
@@ -37,6 +38,11 @@ def solve_vlm(
 
     The right half-wing mesh is solved with a symmetric image system so that
     results correspond to a full symmetric wing.
+
+    Prandtl-Glauert correction is applied when mach > 0: the mesh is stretched
+    chordwise by 1/β (x' = x/β), the incompressible solve is run on the
+    transformed geometry, and the resulting K-J forces already equal the
+    PG-corrected physical forces when normalised by the physical S_ref.
 
     Parameters
     ----------
@@ -51,10 +57,13 @@ def solve_vlm(
         Freestream speed (m/s or non-dimensional, consistent with rho).
     rho : float
         Air density (kg/m³).
+    mach : float
+        Freestream Mach number (0 ≤ M < 1).  0 = incompressible (default).
     S_ref : float, optional
-        Reference area.  Defaults to sum of half-wing panel areas.
+        Reference area.  Defaults to sum of half-wing panel areas of the
+        **original** (physical) mesh.
     b_ref : float, optional
-        Reference span.  Defaults to 2 × max(y) of the mesh.
+        Reference span.  Defaults to 2 × max(y) of the original mesh.
     c_ref : float, optional
         Reference chord (MAC).  Defaults to S_ref / (0.5 × b_ref).
     x_ref : float, optional
@@ -64,7 +73,7 @@ def solve_vlm(
     -------
     dict
         CL, CDi, Cm, Gamma (Np,), forces (Np,3), A (Np,3), B (Np,3),
-        cp (Np,3), V_inf (3,), wake_dir (3,).
+        cp (Np,3), V_inf (3,), wake_dir (3,), mach, beta.
     """
     alpha = np.radians(alpha_deg)
     beta  = np.radians(beta_deg)
@@ -79,10 +88,9 @@ def solve_vlm(
     # Fixed planar wake: aligned with freestream direction
     wake_dir = V_inf / np.linalg.norm(V_inf)
 
-    # Reference quantities
-    S = float(mesh.areas.sum())
+    # Reference quantities from the PHYSICAL (pre-PG) mesh
     if S_ref is None:
-        S_ref = S
+        S_ref = float(mesh.areas.sum())
     if b_ref is None:
         b_ref = 2.0 * float(mesh.vertices[:, 1].max())
     if c_ref is None:
@@ -90,11 +98,23 @@ def solve_vlm(
     if x_ref is None:
         x_ref = 0.25 * c_ref
 
+    # Prandtl-Glauert: stretch mesh in x by 1/β before the incompressible solve.
+    # Reference areas/span/chord stay as physical values; only the moment
+    # reference x-coordinate must be scaled to match the stretched coordinates.
+    pg = 1.0   # β factor; updated below when mach > 0
+    solve_mesh = mesh
+    x_ref_solve = x_ref
+
+    if mach > 1e-6:
+        from ..physics.pg_correction import pg_stretch_mesh
+        solve_mesh, pg = pg_stretch_mesh(mesh, mach)
+        x_ref_solve = x_ref / pg   # moment reference in stretched coordinates
+
     # Build AIC and get vortex-ring geometry
-    AIC, A, B, cp = build_aic(mesh, wake_dir)
+    AIC, A, B, cp = build_aic(solve_mesh, wake_dir)
 
     # RHS: normal wash from freestream (no-penetration BC)
-    rhs = -(V_inf @ mesh.normals.T)   # (Np,)
+    rhs = -(V_inf @ solve_mesh.normals.T)   # (Np,)
 
     # Solve for circulations
     lu, piv = lu_factor(AIC)
@@ -104,8 +124,10 @@ def solve_vlm(
     mid_pts = 0.5 * (A + B)    # (Np, 3)
     V_ind = induced_velocity_at(mid_pts, A, B, Gamma, wake_dir)
 
+    # K-J forces on the stretched geometry with physical S_ref give PG-corrected
+    # aerodynamic coefficients directly (CL = CL_incomp / β, etc.).
     result = compute_forces(
-        A, B, Gamma, V_inf, V_ind, rho, S_ref, b_ref, c_ref, x_ref
+        A, B, Gamma, V_inf, V_ind, rho, S_ref, b_ref, c_ref, x_ref_solve
     )
     result.update({
         "Gamma": Gamma,
@@ -117,5 +139,7 @@ def solve_vlm(
         "S_ref": S_ref,
         "b_ref": b_ref,
         "c_ref": c_ref,
+        "mach": mach,
+        "beta": pg,
     })
     return result
