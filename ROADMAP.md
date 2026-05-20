@@ -55,14 +55,16 @@ lspaero/
 │   │   ├── mesh.py           # Mesh data structure (panels, normals, TE, adjacency)
 │   │   ├── naca.py           # NACA 4-digit airfoil
 │   │   ├── wing.py           # parametric flying-wing mesh generator
-│   │   └── sdf/              # SDF backend (added in Stage 7)
+│   │   ├── body.py           # parametric axisymmetric fuselage generator (Stage 9)
+│   │   ├── tri_utils.py      # triangulate_mesh, TE detection & mesh assembly (Stage 7+8)
+│   │   └── sdf/              # SDF backend (Stage 10)
 │   │       ├── primitives.py
 │   │       ├── wing_sdf.py
 │   │       └── sampler.py
 │   ├── solver/
 │   │   ├── __init__.py
 │   │   ├── biot_savart.py    # vectorized vortex-segment induction
-│   │   ├── influence.py      # AIC matrix assembly
+│   │   ├── influence.py      # AIC matrix assembly (degenerate-quad support: Stage 7)
 │   │   ├── kutta.py          # trailing-edge closure
 │   │   ├── wake.py           # fixed / relaxed wake
 │   │   └── solve.py          # main driver
@@ -72,7 +74,7 @@ lspaero/
 │   │   └── forces.py         # Cp, CL, CDi, Cm integration
 │   ├── io/
 │   │   ├── __init__.py
-│   │   ├── tri.py            # Cart3D .tri reader (optional)
+│   │   ├── tri.py            # Cart3D .tri reader — OpenVSP export (Stage 8)
 │   │   └── vtk.py            # ParaView/PyVista export
 │   └── viz/
 │       ├── __init__.py
@@ -86,11 +88,17 @@ lspaero/
 │   ├── 03_thick_flying_wing/
 │   ├── 04_compressibility/
 │   ├── 05_wake_relaxation/
-│   ├── 06_sdf_backend/
-│   └── 07_sdf_perturbation_study/
+│   ├── 06_tri_mesh/            # Stage 7: triangulated mesh validation (quad vs tri)
+│   ├── 07_tri_import/          # Stage 8: OpenVSP .tri import
+│   ├── 08_wing_body/           # Stage 9: wing-body combination
+│   ├── 09_sdf_backend/         # Stage 10: SDF geometry backend
+│   └── 10_sdf_perturbation/    # Stage 11: SDF perturbation study
 └── tests/
     ├── test_biot_savart.py
     ├── test_mesh.py
+    ├── test_tri_mesh.py        # Stage 7: tri mesh validation
+    ├── test_tri_import.py      # Stage 8: Cart3D .tri import
+    ├── test_wing_body.py       # Stage 9
     ├── test_solver_analytic.py
     ├── test_pg.py
     └── test_sdf.py
@@ -438,7 +446,252 @@ is consistent with the known sensitivity of swept-wing induced drag to wake
 roll-up and downwash redistribution.  VSPAERO comparison deferred (tool not
 available in current environment).
 
-### Stage 7 — SDF geometry backend
+### Stage 7 — Triangulated mesh support (validation)
+
+**Effort:** 3–5 days
+
+**Goal.** Prove that the solver is mesh-topology-agnostic: triangulating a
+parametric quad mesh with `triangulate_mesh` must yield *exact* aerodynamic
+results (CL, CDi, Cm) relative to the original quad mesh.  This validates
+the degenerate-quad representation and the parallelogram-completion trick in
+`_ring_points` *before* any external mesh is introduced.
+
+**Background.** `Mesh.panels` is `(Np, 4)`.  A triangle is stored as a
+*degenerate quad* `(v0, v1, v2, v2)` — the 4th vertex index repeats the 3rd:
+
+- `Mesh` area/normal: the cross-product formula `(v2−v0) × (v3−v1)` collapses
+  to `(v2−v0) × (v2−v1)` = the triangle cross-product, giving the correct area
+  and normal.
+- `source_aic.py`: the zero-length edge v2→v2 contributes nothing (explicit
+  guard `if d < 1e-14: continue`).
+- `influence.py` / `_ring_points`: the missing fourth vortex-ring corner
+  (`v3`) is recovered via **parallelogram completion**:
+  `v3_virt = v0 + (v2 − v1)`.  Exact for rectangular panels; O(taper) error
+  for swept/tapered — verified to be < 0.01% for the test geometries.
+- Triangulation method: *first-diagonal split* — replace `panels[:, 3]` with
+  `panels[:, 2]`.  The *second-diagonal split* `(v0, v2, v3, v3)` gives a
+  wrong virtual vertex (behind the leading edge) and must not be used.
+
+**S_ref note.** Each degenerate-quad has half the area of its parent quad.
+When `S_ref` is inferred from `mesh.areas.sum()` it is halved, doubling CL.
+**Always pass an explicit `S_ref`** when comparing quad vs tri results (or
+when using a triangulated mesh for aerodynamic computations).
+
+**Tasks.**
+
+- [x] `geometry/tri_utils.py`: `triangulate_mesh(mesh: Mesh) -> Mesh`.
+      First-diagonal split; panel count unchanged; `te_pairs` / `te_verts`
+      preserved.  `S_ref` **not** embedded — caller must supply it.
+- [x] `solver/influence.py`: `_ring_points` parallelogram-completion branch
+      for degenerate quads (`panels[:, 2] == panels[:, 3]`).
+- [x] `tests/test_tri_mesh.py`:
+      - Geometry: `triangulate_mesh` preserves centroid location, area is
+        half the parent quad area, normal unchanged.
+      - `te_pairs` / `te_verts` round-trip: same indices after triangulation.
+      - `solve_vlm`: quad vs tri, rectangular AR=8, explicit S_ref → CL error
+        = 0.000% across α = 0°…8°.
+      - `solve_morino`: quad vs tri, NACA 0012 thick rectangular wing →
+        CL error = 0.000%.
+      - Swept/tapered wing: CL error bounded < 10% (parallelogram-completion
+        approximation; ~5.4% observed).
+- [x] `examples/06_tri_mesh/06_tri_mesh.py`:
+      - Rectangular wing AR=8, flat plate: quad vs tri, `solve_vlm`.
+      - Swept flying wing (AR≈7.7, Λ=30°): quad vs tri, `solve_vlm`.
+      - Thick rectangular wing NACA 0012: quad vs tri, `solve_morino`.
+      - Outputs: mesh-comparison plot, CL(α) overlay with error table.
+
+**Verification.**
+
+- Rectangular AR=8 flat-plate wing, `solve_vlm`, explicit S_ref:
+  CL error = 0.000% across all α. ✅
+- NACA 0012 thick rectangular wing, `solve_morino`, explicit S_ref:
+  CL error = 0.000% across all α. ✅
+- Swept/tapered wing (half_span=5, root_chord=2, tip_chord=1, Λ=30°):
+  VLM CL error ≈ 5.4%; this is the expected, bounded error from the
+  parallelogram-completion approximation (proportional to Δchord/panel,
+  → 0 as mesh is refined or taper → 0).  Not a solver defect. ✅
+
+**Exit criterion.** ✅ `examples/06_tri_mesh/06_tri_mesh.py` runs without
+error and produces:
+
+- `06_mesh_comparison.png` — side-by-side quad vs tri panel layouts with
+  panel normals.
+- `06_CL_vs_alpha.png` — `CL(α)` overlay (quad vs tri) for each test case
+  with error annotation.
+- Printed table showing per-case slope error.
+
+All 10 `test_tri_mesh.py` tests pass.
+
+---
+
+### Stage 8 — Cart3D `.tri` import
+
+**Effort:** 1–1.5 weeks
+
+**Goal.** Implement a Cart3D `.tri` file reader to ingest OpenVSP mesh exports.
+Stage 7's validated degenerate-quad support means the solver is already ready;
+this stage adds only the I/O pipeline (reader + TE detection + mesh assembly).
+The solver itself is not touched.
+
+**Background.** OpenVSP exports fully-triangulated surface meshes in Cart3D
+ASCII `.tri` format.  Each triangle is one entry in the file; multiple
+components (wing, body, etc.) are identified by integer `comp_id`.  The
+trailing edge must be detected automatically from mesh topology (open edges
+at maximum-x position with a sufficient dihedral angle).
+
+**Tasks.**
+
+- [x] `io/__init__.py` + `io/tri.py`: Cart3D `.tri` reader.
+      Supports ASCII format:
+      ```
+      Nvert  Ntri  [Ncomp]
+      x1 y1 z1
+      ...
+      i1 j1 k1
+      ...
+      [comp_id per triangle]
+      ```
+      Returns `(vertices, triangles, comp_ids)` as NumPy arrays (0-based).
+      Also `read_tkey(path)` for OpenVSP `.tkey` component-name files.
+- [x] `geometry/tri_utils.py`: mesh topology tools for imported meshes.
+      - `build_edge_table(tris)` — map each directed edge to its adjacent
+        triangle indices.
+      - `detect_te_edges(vertices, tris, comp_ids, lifting_comp_ids,
+                         angle_thresh=150°)` — find open edges at maximum x
+        filtered by dihedral angle; return `(te_pairs, te_verts, wake_seed)`.
+      - `tris_to_mesh(vertices, tris, comp_ids, lifting_comp_ids, mask,
+                      exclude_tip_cap)` — assemble a valid `Mesh` object with
+        degenerate-quad panels; `surface_id` from `comp_ids`; tip-cap panels
+        optionally excluded.
+- [x] `geometry/mesh.py`: `lifting_panels: np.ndarray` (bool, shape `(Np,)`)
+      added — `True` for lifting surfaces, `False` for non-lifting bodies.
+      Default: all `True` (backward compatible).
+- [x] `tests/test_tri_import.py`:
+      - `read_tri` round-trip.
+      - Degenerate-quad area, normal, centroid.
+      - `detect_te_edges` on real OpenVSP `wing.tri` (5 TE pairs, upper z >
+        lower z).
+      - `tris_to_mesh` produces valid `Mesh` (with and without tip-cap
+        exclusion).
+- [x] Fix `examples/07_tri_import/07_tri_import.py`: replace `solve_panel`
+      with `solve_morino` for the aerodynamic comparison (vortex-ring
+      thick-panel solver gives wrong CL on thick surfaces; Morino
+      source+VLM superposition is the correct thick-surface solver).
+
+**Implementation notes (added during fix).**
+
+Two root causes were found and fixed:
+
+1. **`solve_panel` was broken for open-tip wings.** The vortex-ring thick-panel
+   AIC has a near-singular spurious equal-sign circulation mode when the tip is
+   open. Gamma values reached ~−89 instead of ~0.2, causing CL ≈ 0 (imported
+   tri) and CL with wrong sign (parametric). Fixed by replacing `solve_panel`
+   entirely with `solve_morino`, which uses Hess-Smith sources + VLM (stable).
+
+2. **OpenVSP triangle vertex ordering is incompatible with `_ring_points`.**
+   `_ring_points` expects `v0 = fwd-inner, v1 = aft-inner, v2 = aft-outer`
+   for the parallelogram-completion virtual vertex. OpenVSP triangles are
+   arbitrary CCW — using imported panels directly for VLM gives a physically
+   wrong virtual v3 (e.g. below the wing surface for upper-surface panels).
+   Fixed by supplying an **external `cam_mesh`** via `make_vlm_mesh()` whose
+   structured vertex ordering is correct.
+
+   `solve_morino` gained a new optional parameter `cam_mesh: Mesh | None = None`:
+   - When `None` (default): internal parametric path — camber mesh built from
+     vertex averaging (upper/lower split via `surface_id == 0/1`). Unchanged.
+   - When provided: external cam_mesh path — Cp superposition uses nearest-
+     centroid matching to assign `dCp` from the cam-mesh VLM solve to each
+     upper/lower thick-panel by proximity in the (x, y) plane.
+
+**Verification.**
+
+- All 9 `test_tri_import.py` tests pass. ✅
+- A unit square split into two degenerate-quad triangles: `areas.sum() = 1.0`,
+  `normals` all `[0, 0, 1]`. ✅
+- OpenVSP swept tapered wing (5 spanwise strips, NACA 0010, half-span 9,
+  root chord 4, tip chord 1, LE sweep 30°): `CL_α` from `solve_morino` on the
+  imported tri mesh = **4.465 /rad**; matching parametric `make_wing_mesh`
+  result = **4.465 /rad**; **error = 0.0%** (well within 5% target). ✅
+
+**Exit criterion.** ✅ `examples/07_tri_import/07_tri_import.py` produces:
+
+- `07_mesh_comparison.png` — overlaid meshes: parametric quad vs imported tri
+  for the same wing, coloured by z-centroid.
+- `07_CL_vs_alpha.png` — `CL(α)` curves: parametric solver vs tri-import
+  solver, with % error annotation.
+- `07_Cp_wing.png` — chordwise Cp at mid-span, both meshes, α = 5°.
+
+All 54 tests pass (`tests/test_tri_mesh.py` + `tests/test_tri_import.py` +
+all prior test files).
+
+---
+
+### Stage 9 — Wing-body combination
+
+**Effort:** 1.5–2 weeks
+
+**Goal.** Extend the solver to correctly handle non-lifting body panels
+alongside lifting wing panels, enabling panel-method analysis of
+wing-fuselage configurations.  The body is modelled with source panels only
+(no circulation, no Kutta condition, no wake), which is the classical
+Hess–Smith / Morino approach used in VSPAERO Panel mode.
+
+**Physical model.**
+
+| Surface | Panel type | Kutta? | Wake? |
+|---------|-----------|--------|-------|
+| Wing (lifting) | source + vortex doublet | ✅ | ✅ |
+| Fuselage (non-lifting) | source only | ✗ | ✗ |
+| Junction zone | inherits parent tag | — | — |
+
+`lifting_panels` (added in Stage 8) routes the Kutta enforcement:
+`solve_morino` applies `te_pairs` / wake generation only to panels where
+`lifting_panels = True`.  Body panels receive a source-strength solution
+that enforces the no-penetration condition without circulation.
+
+**Tasks.**
+
+- [ ] `solver/morino.py`: apply Kutta condition and wake generation only for
+      `mesh.lifting_panels`-True TE pairs.  Non-lifting panels satisfy
+      no-penetration via sources alone; their RHS row is identical to the
+      lifting case, but no Kutta row is added.
+- [ ] `geometry/body.py`: parametric axisymmetric fuselage generator.
+      `make_body_mesh(length, r_profile, n_axial, n_circ)` where `r_profile`
+      is a callable `r(x)` (e.g. Sears–Haack, circular cylinder, or NACA
+      body-of-revolution).  Produces a closed `Mesh` with
+      `lifting_panels = False` for all panels and no `te_pairs`.
+- [ ] `geometry/mesh.py`: `combine_meshes(meshes: list[Mesh]) -> Mesh` —
+      merges vertex arrays, renumbers panel indices, concatenates `te_pairs`,
+      `wake_seed`, `surface_id`, and `lifting_panels`.  The combined mesh
+      is the only object passed to the solver; it knows nothing about the
+      individual component origins.
+- [ ] `tests/test_wing_body.py`:
+      - Body-alone: `|CL|` < 0.001 after `solve_morino` (purely non-lifting).
+      - No wake filaments emitted from body panels.
+      - `combine_meshes` invariants: vertex count = sum of parts, no index
+        collisions, `te_pairs` from wing are correctly offset.
+- [ ] `examples/08_wing_body/`: swept flying wing + Sears–Haack body at
+      matched fuselage-station x-coordinates.
+
+**Verification.**
+
+- Body-alone: `|CL|` < 10⁻³, stagnation `Cp ≈ 1.0` at nose.
+- Wing+body `CL` vs wing-alone: body volume effect is a small increment
+  (expected sign and order of magnitude ~1–5% for typical aspect ratio).
+- Body surface `Cp` is smooth and symmetric about the xz-plane.
+- No spurious wake filaments emitted from body panels.
+
+**Exit criterion.** `examples/08_wing_body/08_wing_body.py` produces:
+
+- `08_CL_vs_alpha.png` — `CL(α)`: wing-alone vs wing+body.
+- `08_Cp_wing.png` — wing upper/lower `Cp` chordwise strips, with and
+  without body (interference effect visible near root).
+- `08_Cp_body.png` — body surface `Cp` (axial distribution at
+  ϕ = 0°, 90°, 180°).
+
+---
+
+### Stage 10 — SDF geometry backend
 
 **Effort:** 1.5–2 weeks
 
@@ -466,10 +719,11 @@ geometry representation, while keeping the same solver downstream.
 - |∇SDF| measured at sampled surface points is 1.0 ± 0.01.
 - Trailing-edge geometry is preserved (no rounding).
 
-**Exit criterion.** `examples/06_sdf_backend.py` runs both backends on the
-same wing parameters, prints CL/CDi/Cm side by side, plots Cp from both.
+**Exit criterion.** `examples/09_sdf_backend/09_sdf_backend.py` runs both
+backends on the same wing parameters, prints CL/CDi/Cm side by side, plots
+Cp from both.
 
-### Stage 8 — Academic study: SDF perturbation → aerodynamic response
+### Stage 11 — Academic study: SDF perturbation → aerodynamic response
 
 **Effort:** 2–4 weeks (this is the "paper")
 

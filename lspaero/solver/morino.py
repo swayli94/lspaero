@@ -261,12 +261,16 @@ def _build_wake_kutta(
     Np   = mesh.n_panels
     cp   = mesh.centroids           # (Np, 3)
 
-    pu = mesh.vertices[mesh.panels[te_u]]   # (Nte, 4, 3) upper TE panels
-    pl = mesh.vertices[mesh.panels[te_l]]   # (Nte, 4, 3) lower TE panels
-    # Upper winding: v1=aft-inner, v2=aft-outer
-    # Lower winding: v2=aft-outer, v3=aft-inner  (reversed winding on lower)
-    A_w = 0.5 * (pu[:, 1, :] + pl[:, 3, :])   # inner TE midpoint  (Nte, 3)
-    B_w = 0.5 * (pu[:, 2, :] + pl[:, 2, :])   # outer TE midpoint  (Nte, 3)
+    if mesh.te_verts is not None:
+        # General path: explicit TE endpoints (imported triangulated meshes).
+        A_w = mesh.te_verts[:, 0, :]
+        B_w = mesh.te_verts[:, 1, :]
+    else:
+        # Parametric-quad path: infer from panel vertex ordering.
+        pu = mesh.vertices[mesh.panels[te_u]]   # (Nte, 4, 3)
+        pl = mesh.vertices[mesh.panels[te_l]]
+        A_w = 0.5 * (pu[:, 1, :] + pl[:, 3, :])
+        B_w = 0.5 * (pu[:, 2, :] + pl[:, 2, :])
 
     d = wake_dir / np.linalg.norm(wake_dir)
 
@@ -310,6 +314,7 @@ def solve_morino(
     c_ref: float | None = None,
     x_ref: float | None = None,
     n_gauss: int = 2,
+    cam_mesh: Mesh | None = None,
 ) -> dict:
     """Thick-surface aerodynamics: Hess-Smith thickness + VLM lifting effect.
 
@@ -336,6 +341,8 @@ def solve_morino(
     Parameters
     ----------
     mesh      : Mesh from ``make_wing_mesh`` (upper + lower panels, open tip).
+                For imported tri meshes, this is the thick surface from
+                ``tris_to_mesh``.
     alpha_deg : Angle of attack in degrees.
     beta_deg  : Sideslip in degrees.
     V_mag     : Freestream speed.
@@ -351,6 +358,20 @@ def solve_morino(
     c_ref     : Reference chord (S_ref / (0.5 · b_ref) if None).
     x_ref     : Moment reference x (0.25 · c_ref if None).
     n_gauss   : Unused; kept for API compatibility.
+    cam_mesh  : Optional external VLM camber mesh.  When provided, it is used
+                directly for the VLM solve (step B), bypassing the automatic
+                camber-mesh construction from ``mesh``'s vertex structure.
+                This is the correct path for **imported tri meshes** (from
+                ``tris_to_mesh``) whose panels do not follow the parametric
+                vertex ordering required by ``_ring_points``.  In that case,
+                pass a ``make_vlm_mesh`` with matching planform parameters.
+
+                When ``cam_mesh`` is supplied the ΔCp→Cp superposition uses
+                (x, y)-proximity matching between cam-mesh centroids and the
+                thick-mesh centroids (upper panels identified by z > 0).
+
+                Default ``None`` → use the parametric path (build camber mesh
+                from the thick-mesh vertex structure as before).
 
     Returns
     -------
@@ -390,33 +411,52 @@ def solve_morino(
         solve_thick, pg = pg_stretch_mesh(mesh, mach)
 
     # ------------------------------------------------------------------ #
-    # 1. Mean camber surface from the (possibly PG-stretched) thick mesh  #
+    # 1. Mean camber surface                                             #
+    #                                                                   #
+    # Two paths:                                                        #
+    #   (a) cam_mesh provided externally → use as-is (imported meshes) #
+    #   (b) cam_mesh is None → build from parametric thick-mesh verts   #
     # ------------------------------------------------------------------ #
-    n_up   = int((solve_thick.surface_id == 0).sum())
-    off_lo = int(np.min(solve_thick.panels[solve_thick.surface_id == 1]))
+    if cam_mesh is not None:
+        # ---- External cam_mesh path (imported tri meshes) ---------- #
+        # The caller supplies a make_vlm_mesh() with matching planform.
+        # PG-stretch only the cam_mesh; the thick mesh is already
+        # stretched in solve_thick.
+        cam_mesh_vlm = cam_mesh
+        if mach > 1e-6:
+            from ..physics.pg_correction import pg_stretch_mesh
+            cam_mesh_vlm, _ = pg_stretch_mesh(cam_mesh, mach)
+        n_up = None   # not used in this path
+    else:
+        # ---- Parametric path --------------------------------------- #
+        # Build camber mesh by averaging upper / lower vertex arrays.
+        # Only valid for make_wing_mesh() output where upper vertices
+        # occupy indices [0, off_lo) and lower occupy [off_lo, 2*off_lo).
+        n_up   = int((solve_thick.surface_id == 0).sum())
+        off_lo = int(np.min(solve_thick.panels[solve_thick.surface_id == 1]))
 
-    cam_vertices = 0.5 * (
-        solve_thick.vertices[:off_lo] + solve_thick.vertices[off_lo:2 * off_lo]
-    )
-    cam_panels   = solve_thick.panels[solve_thick.surface_id == 0].copy()
-    te_u_idx     = solve_thick.te_pairs[:, 0]
-    cam_te_pairs = np.column_stack([te_u_idx, te_u_idx])
+        cam_vertices = 0.5 * (
+            solve_thick.vertices[:off_lo] + solve_thick.vertices[off_lo:2 * off_lo]
+        )
+        cam_panels   = solve_thick.panels[solve_thick.surface_id == 0].copy()
+        te_u_idx     = solve_thick.te_pairs[:, 0]
+        cam_te_pairs = np.column_stack([te_u_idx, te_u_idx])
 
-    cam_mesh = Mesh(
-        vertices=cam_vertices,
-        panels=cam_panels,
-        te_pairs=cam_te_pairs,
-        wake_seed=solve_thick.wake_seed,
-        surface_id=np.zeros(n_up, dtype=int),
-    )
+        cam_mesh_vlm = Mesh(
+            vertices=cam_vertices,
+            panels=cam_panels,
+            te_pairs=cam_te_pairs,
+            wake_seed=solve_thick.wake_seed,
+            surface_id=np.zeros(n_up, dtype=int),
+        )
 
     # ------------------------------------------------------------------ #
     # 2. VLM solve on camber mesh → Γ, K-J forces, collocation points    #
-    # PG is already embedded via solve_thick/cam_mesh; x_ref must be     #
+    # PG is already embedded via solve_thick/cam_mesh_vlm; x_ref must be #
     # scaled to stretched coordinates for correct moment computation.    #
     # ------------------------------------------------------------------ #
     vlm = solve_vlm(
-        cam_mesh,
+        cam_mesh_vlm,
         alpha_deg=alpha_deg,
         beta_deg=beta_deg,
         V_mag=V_mag,
@@ -455,15 +495,44 @@ def solve_morino(
     # where Δx_j ≈ panel area / spanwise bound-vortex length |B−A|.      #
     # ------------------------------------------------------------------ #
     span_len  = np.maximum(np.linalg.norm(vlm["B"] - vlm["A"], axis=-1), 1e-12)
-    chord_len = cam_mesh.areas / span_len                  # (Np_cam,) chord widths
+    chord_len = cam_mesh_vlm.areas / span_len              # (Np_cam,) chord widths
     dCp       = 2.0 * vlm["Gamma"] / (V_mag * chord_len)  # (Np_cam,) pressure diff
 
     # ------------------------------------------------------------------ #
     # 5. Upper/lower Cp: superimpose thickness Cp and lifting ΔCp         #
     # ------------------------------------------------------------------ #
     Cp = np.zeros(solve_thick.n_panels)
-    Cp[:n_up]         = Cp_thickness[:n_up]         - 0.5 * dCp
-    Cp[n_up:2 * n_up] = Cp_thickness[n_up:2 * n_up] + 0.5 * dCp
+
+    if cam_mesh is not None:
+        # ---- External cam_mesh path (imported tri meshes) ---------- #
+        # Identify upper / lower panels by centroid z-sign.
+        # Match each thick-mesh panel to the nearest cam panel in (x, y)
+        # to propagate ΔCp from the VLM camber mesh to the surface Cp.
+        mask_up = solve_thick.centroids[:, 2] > 0   # (Np,) upper surface
+        mask_lo = ~mask_up                           # lower surface (incl. z==0)
+
+        cent_cam = cam_mesh_vlm.centroids[:, :2]     # (Np_cam, 2)
+
+        def _nearest_cam(cent_xy: np.ndarray) -> np.ndarray:
+            """Return index of nearest cam panel for each row in cent_xy."""
+            # cent_xy : (N, 2)
+            d2 = np.sum(
+                (cent_cam[None, :, :] - cent_xy[:, None, :]) ** 2, axis=-1
+            )                                        # (N, Np_cam)
+            return np.argmin(d2, axis=1)             # (N,)
+
+        if mask_up.any():
+            idx_up = _nearest_cam(solve_thick.centroids[mask_up, :2])
+            Cp[mask_up] = Cp_thickness[mask_up] - 0.5 * dCp[idx_up]
+        if mask_lo.any():
+            idx_lo = _nearest_cam(solve_thick.centroids[mask_lo, :2])
+            Cp[mask_lo] = Cp_thickness[mask_lo] + 0.5 * dCp[idx_lo]
+    else:
+        # ---- Parametric path --------------------------------------- #
+        # Upper panels are first n_up entries; lower are next n_up.
+        Cp[:n_up]         = Cp_thickness[:n_up]         - 0.5 * dCp
+        Cp[n_up:2 * n_up] = Cp_thickness[n_up:2 * n_up] + 0.5 * dCp
+
     np.clip(Cp, -np.inf, 1.0, out=Cp)
 
     # Prandtl-Glauert: divide Cp by β to recover physical (compressible) Cp.

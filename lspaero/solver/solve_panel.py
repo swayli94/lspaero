@@ -127,17 +127,43 @@ def solve_panel(
 
     Cp = 1.0 - np.einsum("ij,ij->i", V_surface, V_surface) / (V_mag ** 2)
 
-    # ---- Force integration ----
+    # ---- Force integration: Cp path ----
     result = forces_from_cp(mesh, Cp, V_inf, rho, S_ref, b_ref, c_ref, x_ref)
+
+    # ---- Force integration: wake K-J path (topology-independent) ----
+    #
+    # Kutta-Joukowski on the right-half wake horseshoes:
+    #   F_k = ρ Γ_wake[k] (V_∞ × ΔB_k)
+    # where Γ_wake[k] = Γ[te_u[k]] − Γ[te_l[k]] and ΔB_k = B_w[k] − A_w[k].
+    #
+    # This formulation is mesh-topology-independent: it works for structured quads,
+    # degenerate-quad (triangulated), and imported Cart3D meshes alike.
+    # It gives the correct full-wing CL when normalised by the half-wing S_ref
+    # (the factor of 2 for the image wing cancels with the factor of 2 in
+    # q·2·S_ref, identical to the convention in compute_forces).
+    dB = B_w - A_w                              # (Nte, 3) wake bound-vortex vectors
+    F_wake = rho * np.einsum(
+        "k,ki->i",
+        Gamma_wake,
+        np.cross(np.broadcast_to(V_inf, dB.shape), dB),
+    )                                           # (3,) right-half-wing wake force
+
+    q          = 0.5 * rho * V_mag ** 2
+    lift_hat   = np.array([-np.sin(alpha), 0.0,  np.cos(alpha)])
+    drag_hat   = np.array([ np.cos(alpha), 0.0,  np.sin(alpha)])
+
     result.update({
-        "Gamma": Gamma,
-        "V_surface": V_surface,
-        "V_inf": V_inf,
-        "wake_dir": wake_dir,
-        "A_w": A_w,
-        "B_w": B_w,
-        "S_ref": S_ref,
-        "b_ref": b_ref,
-        "c_ref": c_ref,
+        "Gamma":       Gamma,
+        "Cp":          Cp,
+        "V_surface":   V_surface,
+        "V_inf":       V_inf,
+        "wake_dir":    wake_dir,
+        "A_w":         A_w,
+        "B_w":         B_w,
+        "S_ref":       S_ref,
+        "b_ref":       b_ref,
+        "c_ref":       c_ref,
+        "CL_wake":     float(F_wake @ lift_hat) / (q * S_ref),
+        "CDi_wake":    float(F_wake @ drag_hat) / (q * S_ref),
     })
     return result

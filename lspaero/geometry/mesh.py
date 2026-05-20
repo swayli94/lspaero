@@ -56,6 +56,22 @@ class Mesh:
     surface_id: np.ndarray = field(
         default_factory=lambda: np.empty(0, dtype=int)
     )
+    # Stage 7 additions — optional, default-None / default-empty
+    te_verts: np.ndarray | None = field(default=None)
+    """(Nte, 2, 3) float — inner/outer TE edge endpoints per TE pair.
+
+    When set (imported tri meshes), ``build_panel_aic`` uses these directly
+    instead of inferring wake endpoints from the parametric panel vertex
+    ordering.  None → fall back to the parametric formula.
+    """
+    lifting_panels: np.ndarray = field(
+        default_factory=lambda: np.empty(0, dtype=bool)
+    )
+    """(Np,) bool — True for panels that carry circulation (Kutta + wake).
+
+    Defaults to all-True when empty.  Used in Stage 8 to exclude non-lifting
+    body panels from wake generation.
+    """
 
     # ------------------------------------------------------------------ #
     # Derived (set by __post_init__, not passed to the constructor)        #
@@ -74,8 +90,20 @@ class Mesh:
     # ------------------------------------------------------------------ #
 
     def _compute_derived(self) -> None:
-        v = self.vertices[self.panels]          # (Np, 4, 3)
-        self.centroids = v.mean(axis=1)          # (Np, 3)
+        v = self.vertices[self.panels]           # (Np, 4, 3)
+
+        # Centroid: degenerate quads (triangles with v[2]==v[3]) must use the
+        # 3-vertex average; regular quads use the 4-vertex average.
+        # Vectorised: identify degenerate panels, then blend.
+        is_tri = (self.panels[:, 2] == self.panels[:, 3])   # (Np,) bool
+        cent_quad = v.mean(axis=1)                           # (Np, 3)
+        cent_tri  = v[:, :3].mean(axis=1)                   # (Np, 3)
+        self.centroids = np.where(is_tri[:, None], cent_tri, cent_quad)
+
+        # Normal and area via diagonal cross-product — correct for both quads
+        # and degenerate quads:
+        #   d1×d2 = (v2-v0)×(v3-v1)
+        # For (i,j,k,k): d1=(k-i), d2=(k-j) → cross = (b-a)×(c-a)  [triangle]
         d1 = v[:, 2] - v[:, 0]                  # diagonal 0 → 2  (Np, 3)
         d2 = v[:, 3] - v[:, 1]                  # diagonal 1 → 3  (Np, 3)
         cross = np.cross(d1, d2)                 # (Np, 3)

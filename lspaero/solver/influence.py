@@ -38,12 +38,30 @@ def _ring_points(mesh: Mesh):
     - B  (1/4-chord outer)  = 0.75·v3 + 0.25·v2
     - cp (3/4-chord midspan)= 0.125·v0 + 0.375·v1 + 0.375·v2 + 0.125·v3
 
+    **Degenerate-quad panels (triangles).**
+    Triangles are stored as ``(v0, v1, v2, v2)`` — the last vertex is repeated.
+    The parametric convention is v0=fwd-inner, v1=aft-inner, v2=aft-outer, so v3
+    (fwd-outer) is *missing*.  We recover it via the **parallelogram completion**
+    rule, which is exact for rectangular panels and first-order accurate for
+    swept/tapered ones:
+
+        v3_virtual = v0 + (v2 − v1)
+
+    This gives A, B, cp identical to the parent quad for a planar parallelogram
+    panel and differs by only O(taper fraction) for typical wing meshes.
+
     Returns
     -------
     A, B, cp : each (Np, 3)
     """
     v = mesh.vertices[mesh.panels]   # (Np, 4, 3)
     v0, v1, v2, v3 = v[:, 0], v[:, 1], v[:, 2], v[:, 3]
+
+    # Parallelogram completion for degenerate quads (panels[:, 2] == panels[:, 3])
+    is_tri = mesh.panels[:, 2] == mesh.panels[:, 3]   # (Np,) bool
+    if is_tri.any():
+        v3_virt = v0 + (v2 - v1)           # estimated fwd-outer vertex  (Np, 3)
+        v3 = np.where(is_tri[:, None], v3_virt, v3)   # replace only for triangles
 
     A  = 0.75 * v0 + 0.25 * v1                                    # (Np, 3)
     B  = 0.75 * v3 + 0.25 * v2
@@ -241,16 +259,24 @@ def build_panel_aic(
     AIC = np.einsum("ijk,ik->ij", vel_body, n)   # (Np, Np)
 
     # ---- Wake geometry from TE pairs ----
-    # Upper TE panel winding: v0=fore-inner, v1=aft-inner, v2=aft-outer, v3=fore-outer
-    # Lower TE panel winding: v0=fore-inner, v1=fore-outer, v2=aft-outer, v3=aft-inner
-    # TE edge: upper v1(aft-inner)→v2(aft-outer); lower v2(aft-outer)→v3(aft-inner)
     te_u = mesh.te_pairs[:, 0]   # (Nte,) upper TE panel indices
     te_l = mesh.te_pairs[:, 1]   # (Nte,) lower TE panel indices
-    pu = mesh.vertices[mesh.panels[te_u]]  # (Nte, 4, 3)
-    pl = mesh.vertices[mesh.panels[te_l]]
 
-    A_w = 0.5 * (pu[:, 1, :] + pl[:, 3, :])   # inner TE midpoint  (Nte, 3)
-    B_w = 0.5 * (pu[:, 2, :] + pl[:, 2, :])   # outer TE midpoint  (Nte, 3)
+    if mesh.te_verts is not None:
+        # General path: explicit TE edge endpoints stored in mesh.te_verts.
+        # Used for imported triangulated meshes (Stage 7+) where vertex
+        # ordering of the degenerate-quad panels does not follow the
+        # parametric convention assumed below.
+        A_w = mesh.te_verts[:, 0, :]   # inner (root-side) TE point  (Nte, 3)
+        B_w = mesh.te_verts[:, 1, :]   # outer (tip-side)  TE point  (Nte, 3)
+    else:
+        # Parametric-quad path: infer TE endpoints from panel vertex ordering.
+        # Upper winding: v0=fore-inner, v1=aft-inner, v2=aft-outer, v3=fore-outer
+        # Lower winding: v0=fore-inner, v1=fore-outer, v2=aft-outer, v3=aft-inner
+        pu = mesh.vertices[mesh.panels[te_u]]   # (Nte, 4, 3)
+        pl = mesh.vertices[mesh.panels[te_l]]
+        A_w = 0.5 * (pu[:, 1, :] + pl[:, 3, :])   # inner TE midpoint  (Nte, 3)
+        B_w = 0.5 * (pu[:, 2, :] + pl[:, 2, :])   # outer TE midpoint  (Nte, 3)
 
     # Wake horseshoe: bound A_w→B_w (inner→outer) + two semi-infinite legs
     Pp   = cp[:, None, :]     # (Np, 1, 3)
