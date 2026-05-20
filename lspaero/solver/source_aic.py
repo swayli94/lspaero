@@ -96,11 +96,18 @@ def _hess_smith_vel(
 
 
 def build_source_aic(mesh: Mesh) -> np.ndarray:
-    """Build the source panel AIC matrix (right wing + mirror image).
+    """Build the source panel AIC matrix (right wing + selective mirror image).
 
     AIC_σ[i, j] = normal velocity at collocation i from a unit-strength source
-    on panel j (right wing) PLUS the image source on the mirror panel j′
-    (y → −y), matching the symmetry treatment in build_panel_aic.
+    on panel j, PLUS the image source on the mirror panel j′ (y → −y) when
+    panel j is a *lifting* panel (``mesh.lifting_panels[j] = True``).
+
+    **Why selective imaging?**
+    The y → −y image system models the full symmetric wing from the half-wing
+    mesh.  For a complete 360° fuselage whose panels already exist on both sides
+    of the symmetry plane (``lifting_panels = False``), adding the image would
+    double-count the body's self-influence.  Only lifting (wing) panels use the
+    image system; non-lifting (body) panels contribute directly.
 
     The diagonal is set to the exact half-space value 0.5; the image of the
     self-panel is far away and contributes only off-diagonal terms.
@@ -108,7 +115,8 @@ def build_source_aic(mesh: Mesh) -> np.ndarray:
     Parameters
     ----------
     mesh : Mesh
-        Surface mesh (upper + lower panels; tip cap optional).
+        Surface mesh (upper + lower wing panels; optional tip cap;
+        optional non-lifting body panels).
 
     Returns
     -------
@@ -118,6 +126,13 @@ def build_source_aic(mesh: Mesh) -> np.ndarray:
     pv  = mesh.vertices[mesh.panels]   # (Np, 4, 3)
     cp  = mesh.centroids               # (Np, 3)
     n   = mesh.normals                 # (Np, 3)
+
+    # Determine which source panels should contribute an image.
+    # Empty lifting_panels → backward-compatible all-True (pure wing meshes).
+    if mesh.lifting_panels.size > 0:
+        use_image = mesh.lifting_panels          # (Np,) bool
+    else:
+        use_image = np.ones(Np, dtype=bool)
 
     AIC = np.zeros((Np, Np))
 
@@ -150,7 +165,7 @@ def build_source_aic(mesh: Mesh) -> np.ndarray:
         uu = u_v[j]   # (4,)
         vv = v_v[j]   # (4,)
 
-        # ---- Right-wing source ---- #
+        # ---- Direct (right-wing / body) source ---- #
         dr  = cp - c_j[j]           # (Np, 3)
         u_p = dr @ e_x[j]
         v_p = dr @ e_y[j]
@@ -162,7 +177,10 @@ def build_source_aic(mesh: Mesh) -> np.ndarray:
                       + vel_w[:, None] * e_z[j])
         AIC[:, j] += np.einsum("ij,ij->i", vel_global, n)
 
-        # ---- Image source (y → −y) ---- #
+        # ---- Image source (y → −y) — lifting panels only ---- #
+        if not use_image[j]:
+            continue
+
         dr_img  = cp - c_j_img[j]   # (Np, 3) offset from image centroid
         u_img   = dr_img @ e_x_img[j]
         v_img   = dr_img @ e_y_img[j]
@@ -188,7 +206,10 @@ def source_velocity_field(
     """3-D velocity at arbitrary evaluation points from a source distribution.
 
     Returns V(r) = Σ_j σ_j · V_source_j(r) where V_source_j is the Hess-Smith
-    velocity field of the j-th panel (right wing + y→−y image).
+    velocity field of the j-th panel.  For lifting panels (wing),
+    the y → −y image contribution is added; for non-lifting (body) panels the
+    image is omitted (the full body is already explicitly meshed at both y > 0
+    and y < 0).
 
     The self-panel singularity is not handled here — eval_points should be
     displaced from panel centroids (e.g. the actual surface centroids of a
@@ -212,6 +233,12 @@ def source_velocity_field(
     Ne = len(eval_points)
     pv = mesh.vertices[mesh.panels]   # (Np, 4, 3)
     n  = mesh.normals                 # (Np, 3)
+
+    # Which panels add a y → −y image contribution?
+    if mesh.lifting_panels.size > 0:
+        use_image = mesh.lifting_panels
+    else:
+        use_image = np.ones(Np, dtype=bool)
 
     # Local frames for right-wing panels
     e_x = pv[:, 1, :] - pv[:, 0, :]
@@ -243,7 +270,7 @@ def source_velocity_field(
         uu = u_v[j]   # (4,)
         vv = v_v[j]   # (4,)
 
-        # Right-wing contribution
+        # Direct (right-wing / body) contribution
         dr  = ep - c_j[j]
         u_p = dr @ e_x[j]
         v_p = dr @ e_y[j]
@@ -252,7 +279,10 @@ def source_velocity_field(
         vel_g = vu[:, None] * e_x[j] + vv_[:, None] * e_y[j] + vw[:, None] * e_z[j]
         vel += sigma[j] * vel_g
 
-        # Image contribution (y → −y)
+        # Image contribution (y → −y) — lifting panels only
+        if not use_image[j]:
+            continue
+
         dr_img = ep - c_j_img[j]
         u_p_i  = dr_img @ e_x_img[j]
         v_p_i  = dr_img @ e_y_img[j]

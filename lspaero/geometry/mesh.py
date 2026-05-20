@@ -163,3 +163,125 @@ class Mesh:
         n_mag = np.linalg.norm(n, axis=1, keepdims=True)
         n_hat = n / np.where(n_mag > 0, n_mag, 1.0)
         return float(np.max(np.abs(np.einsum("ij,ij->i", e3, n_hat))))
+
+
+# ---------------------------------------------------------------------------
+# Multi-body merge
+# ---------------------------------------------------------------------------
+
+def combine_meshes(meshes: list["Mesh"]) -> "Mesh":
+    """Merge a list of Mesh objects into a single combined Mesh.
+
+    Vertex arrays are stacked with appropriate index offsets; ``te_pairs``,
+    ``wake_seed``, ``surface_id``, ``lifting_panels``, and ``te_verts`` are
+    concatenated.  The combined mesh is the sole object passed to the solver —
+    it carries no information about individual component origins.
+
+    Typical use::
+
+        wing = make_wing_mesh(...)
+        body = make_body_mesh(...)
+        combined = combine_meshes([wing, body])
+        result = solve_morino(combined, cam_mesh=make_vlm_mesh(...))
+
+    Parameters
+    ----------
+    meshes : list[Mesh]
+        Component meshes to merge.  At least one must be provided.
+
+    Returns
+    -------
+    Mesh
+        Combined mesh.  Invariants:
+
+        * Total vertex count = Σ n_vertices.
+        * Total panel count  = Σ n_panels.
+        * Panel indices in the combined ``panels`` array are offset so that
+          they index into the combined ``vertices`` array.
+        * ``te_pairs`` indices are offset so that they index into the combined
+          ``panels`` array.
+        * ``lifting_panels`` is ``True`` for panels from meshes whose
+          ``lifting_panels`` was all-True (or empty, i.e. default); ``False``
+          for explicitly non-lifting panels (e.g. fuselage from
+          ``make_body_mesh``).
+    """
+    if not meshes:
+        raise ValueError("combine_meshes requires at least one Mesh.")
+
+    all_vertices: list[np.ndarray]      = []
+    all_panels:   list[np.ndarray]      = []
+    all_te_pairs: list[np.ndarray]      = []
+    all_wake_seed: list[np.ndarray]     = []
+    all_surface_id: list[np.ndarray]    = []
+    all_lifting:   list[np.ndarray]     = []
+    all_te_verts:  list[np.ndarray]     = []
+    has_te_verts = False
+
+    v_off = 0   # running vertex index offset
+    p_off = 0   # running panel index offset
+
+    for m in meshes:
+        Np = m.n_panels
+        Nv = m.n_vertices
+
+        all_vertices.append(m.vertices)
+        all_panels.append(m.panels + v_off)
+
+        if m.te_pairs.size > 0:
+            all_te_pairs.append(m.te_pairs + p_off)
+        if m.wake_seed.shape[0] > 0:
+            all_wake_seed.append(m.wake_seed)
+
+        # surface_id: fall back to all-zero if missing
+        sid = m.surface_id if m.surface_id.size > 0 else np.zeros(Np, dtype=int)
+        all_surface_id.append(sid)
+
+        # lifting_panels: empty → all lifting (backward compat)
+        lp = m.lifting_panels
+        if lp.size == 0:
+            lp = np.ones(Np, dtype=bool)
+        all_lifting.append(lp)
+
+        # te_verts (optional)
+        if m.te_verts is not None:
+            all_te_verts.append(m.te_verts)
+            has_te_verts = True
+        else:
+            all_te_verts.append(None)
+
+        v_off += Nv
+        p_off += Np
+
+    combined_vertices  = np.vstack(all_vertices)
+    combined_panels    = np.vstack(all_panels)
+
+    if all_te_pairs:
+        combined_te_pairs  = np.vstack(all_te_pairs)
+    else:
+        combined_te_pairs  = np.empty((0, 2), dtype=int)
+
+    if all_wake_seed:
+        combined_wake_seed = np.vstack(all_wake_seed)
+    else:
+        combined_wake_seed = np.empty((0, 3), dtype=float)
+
+    combined_surface_id = np.concatenate(all_surface_id)
+    combined_lifting    = np.concatenate(all_lifting)
+
+    combined_te_verts: np.ndarray | None = None
+    if has_te_verts:
+        # Only include te_verts from meshes that have them; others have none.
+        # (Typically only imported-tri wing meshes carry te_verts.)
+        parts = [tv for tv in all_te_verts if tv is not None]
+        if parts:
+            combined_te_verts = np.vstack(parts)
+
+    return Mesh(
+        vertices=combined_vertices,
+        panels=combined_panels,
+        te_pairs=combined_te_pairs,
+        wake_seed=combined_wake_seed,
+        surface_id=combined_surface_id,
+        te_verts=combined_te_verts,
+        lifting_panels=combined_lifting,
+    )

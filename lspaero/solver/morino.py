@@ -393,13 +393,29 @@ def solve_morino(
     ])
     wake_dir = V_inf / np.linalg.norm(V_inf)
 
-    # Reference quantities from PHYSICAL (pre-PG) mesh
+    # ------------------------------------------------------------------ #
+    # Lifting-panel mask                                                   #
+    # Empty lifting_panels → backward-compatible all-True (pure wing).   #
+    # ------------------------------------------------------------------ #
+    if mesh.lifting_panels.size > 0:
+        lifting_mask = mesh.lifting_panels       # (Np,) bool
+    else:
+        lifting_mask = np.ones(mesh.n_panels, dtype=bool)
+    has_lifting = bool(lifting_mask.any())
+
+    # ------------------------------------------------------------------ #
+    # Reference quantities from PHYSICAL (pre-PG) mesh                   #
+    # S_ref: upper-wing panel areas; falls back to total area if none.   #
+    # ------------------------------------------------------------------ #
     if S_ref is None:
-        S_ref = float(mesh.areas[mesh.surface_id == 0].sum())
+        upper_area = float(
+            mesh.areas[(mesh.surface_id == 0) & lifting_mask].sum()
+        )
+        S_ref = upper_area if upper_area > 1e-30 else float(mesh.areas.sum())
     if b_ref is None:
         b_ref = 2.0 * float(mesh.vertices[:, 1].max())
     if c_ref is None:
-        c_ref = S_ref / (0.5 * b_ref)
+        c_ref = S_ref / (0.5 * b_ref) if b_ref > 1e-30 else 1.0
     if x_ref is None:
         x_ref = 0.25 * c_ref
 
@@ -410,25 +426,41 @@ def solve_morino(
         from ..physics.pg_correction import pg_stretch_mesh
         solve_thick, pg = pg_stretch_mesh(mesh, mach)
 
+    # Inherit the lifting mask on the (possibly PG-stretched) mesh.
+    # pg_stretch_mesh preserves all attributes; lifting_panels is unchanged.
+
     # ------------------------------------------------------------------ #
-    # 1. Mean camber surface                                             #
-    #                                                                   #
-    # Two paths:                                                        #
-    #   (a) cam_mesh provided externally → use as-is (imported meshes) #
-    #   (b) cam_mesh is None → build from parametric thick-mesh verts   #
+    # 1. Mean camber surface                                              #
+    #                                                                     #
+    # Three cases:                                                        #
+    #   (a) has_lifting=False (body-only): skip VLM entirely.            #
+    #   (b) cam_mesh provided externally: use as-is (imported / combined)#
+    #   (c) cam_mesh is None: build from parametric thick-mesh vertices  #
+    #       (only valid for make_wing_mesh() output).                    #
     # ------------------------------------------------------------------ #
-    if cam_mesh is not None:
-        # ---- External cam_mesh path (imported tri meshes) ---------- #
-        # The caller supplies a make_vlm_mesh() with matching planform.
-        # PG-stretch only the cam_mesh; the thick mesh is already
-        # stretched in solve_thick.
+    if not has_lifting:
+        # ---- Body-only path: no circulation anywhere ------------------- #
+        cam_mesh_vlm = None
+        n_up = 0
+        vlm = {
+            "CL": 0.0, "CDi": 0.0, "Cm": 0.0,
+            "L":  0.0, "Di":  0.0, "M":  0.0,
+            "Gamma": np.zeros(0),
+            "A":     np.zeros((0, 3)),
+            "B":     np.zeros((0, 3)),
+        }
+        dCp = np.zeros(0)
+
+    elif cam_mesh is not None:
+        # ---- External cam_mesh path (imported tri / combined meshes) --- #
         cam_mesh_vlm = cam_mesh
         if mach > 1e-6:
             from ..physics.pg_correction import pg_stretch_mesh
             cam_mesh_vlm, _ = pg_stretch_mesh(cam_mesh, mach)
         n_up = None   # not used in this path
+
     else:
-        # ---- Parametric path --------------------------------------- #
+        # ---- Parametric path ------------------------------------------ #
         # Build camber mesh by averaging upper / lower vertex arrays.
         # Only valid for make_wing_mesh() output where upper vertices
         # occupy indices [0, off_lo) and lower occupy [off_lo, 2*off_lo).
@@ -452,28 +484,35 @@ def solve_morino(
 
     # ------------------------------------------------------------------ #
     # 2. VLM solve on camber mesh → Γ, K-J forces, collocation points    #
-    # PG is already embedded via solve_thick/cam_mesh_vlm; x_ref must be #
-    # scaled to stretched coordinates for correct moment computation.    #
+    # (skipped for body-only meshes)                                      #
     # ------------------------------------------------------------------ #
-    vlm = solve_vlm(
-        cam_mesh_vlm,
-        alpha_deg=alpha_deg,
-        beta_deg=beta_deg,
-        V_mag=V_mag,
-        rho=rho,
-        S_ref=S_ref,
-        b_ref=b_ref,
-        c_ref=c_ref,
-        x_ref=x_ref / pg,   # moment reference in stretched coordinates
-    )
+    if has_lifting:
+        # PG is already embedded via solve_thick/cam_mesh_vlm; x_ref must
+        # be scaled to stretched coordinates for correct moment computation.
+        vlm = solve_vlm(
+            cam_mesh_vlm,
+            alpha_deg=alpha_deg,
+            beta_deg=beta_deg,
+            V_mag=V_mag,
+            rho=rho,
+            S_ref=S_ref,
+            b_ref=b_ref,
+            c_ref=c_ref,
+            x_ref=x_ref / pg,   # moment reference in stretched coordinates
+        )
+
+        # ΔCp_j = (p_lower − p_upper)/q = 2Γ_j / (V_∞ · Δx_j)
+        span_len  = np.maximum(np.linalg.norm(vlm["B"] - vlm["A"], axis=-1), 1e-12)
+        chord_len = cam_mesh_vlm.areas / span_len          # (Np_cam,)
+        dCp       = 2.0 * vlm["Gamma"] / (V_mag * chord_len)  # (Np_cam,)
 
     # ------------------------------------------------------------------ #
     # 3. Hess-Smith source solve on thick surface → thickness Cp          #
     #                                                                     #
-    # We solve at α = 0° to get the pure-thickness symmetric Cp.         #
-    # Solving at the actual α would embed the stagnation-point shift      #
-    # (a lifting effect) into σ, which then double-counts the VLM ΔCp.  #
-    # Linear superposition: Cp = Cp_thickness(α=0) + Cp_lifting(α).     #
+    # Solved at α = 0° (pure thickness; no stagnation-point shift).      #
+    # Non-lifting body panels are included in this solve — they carry     #
+    # source strengths that enforce zero normal penetration for thickness  #
+    # alone.  Their Cp is the source-only Cp (no ΔCp addition later).    #
     # ------------------------------------------------------------------ #
     from .source_aic import build_source_aic, source_velocity_field
 
@@ -489,49 +528,47 @@ def solve_morino(
     Cp_thickness = 1.0 - Vt_sq / V_mag**2                 # (Np,) symmetric thickness Cp
 
     # ------------------------------------------------------------------ #
-    # 4. Lifting pressure difference from K-J                             #
+    # 4. Upper/lower Cp: superimpose thickness Cp and lifting ΔCp         #
     #                                                                     #
-    # ΔCp_j = (p_lower − p_upper)/q = 2Γ_j / (V_∞ · Δx_j)              #
-    # where Δx_j ≈ panel area / spanwise bound-vortex length |B−A|.      #
+    # Lifting panels:                                                      #
+    #   Cp_upper[j] = Cp_thickness_upper[j] − ΔCp_j / 2   (suction)    #
+    #   Cp_lower[j] = Cp_thickness_lower[j] + ΔCp_j / 2   (pressure)   #
+    # Non-lifting (body) panels:                                           #
+    #   Cp[j] = Cp_thickness[j]  (source only; no circulation)           #
     # ------------------------------------------------------------------ #
-    span_len  = np.maximum(np.linalg.norm(vlm["B"] - vlm["A"], axis=-1), 1e-12)
-    chord_len = cam_mesh_vlm.areas / span_len              # (Np_cam,) chord widths
-    dCp       = 2.0 * vlm["Gamma"] / (V_mag * chord_len)  # (Np_cam,) pressure diff
+    Cp = Cp_thickness.copy()   # start with source Cp for all panels
 
-    # ------------------------------------------------------------------ #
-    # 5. Upper/lower Cp: superimpose thickness Cp and lifting ΔCp         #
-    # ------------------------------------------------------------------ #
-    Cp = np.zeros(solve_thick.n_panels)
+    if has_lifting:
+        if cam_mesh is not None:
+            # ---- External cam_mesh path (imported tri / combined meshes) #
+            # Upper/lower classification by centroid z-sign, restricted to  #
+            # lifting panels (body panels are not classified this way).     #
+            mask_up = (solve_thick.centroids[:, 2] > 0) & lifting_mask
+            mask_lo = (solve_thick.centroids[:, 2] <= 0) & lifting_mask
 
-    if cam_mesh is not None:
-        # ---- External cam_mesh path (imported tri meshes) ---------- #
-        # Identify upper / lower panels by centroid z-sign.
-        # Match each thick-mesh panel to the nearest cam panel in (x, y)
-        # to propagate ΔCp from the VLM camber mesh to the surface Cp.
-        mask_up = solve_thick.centroids[:, 2] > 0   # (Np,) upper surface
-        mask_lo = ~mask_up                           # lower surface (incl. z==0)
+            cent_cam = cam_mesh_vlm.centroids[:, :2]     # (Np_cam, 2)
 
-        cent_cam = cam_mesh_vlm.centroids[:, :2]     # (Np_cam, 2)
+            def _nearest_cam(cent_xy: np.ndarray) -> np.ndarray:
+                """Return index of nearest cam panel for each row in cent_xy."""
+                d2 = np.sum(
+                    (cent_cam[None, :, :] - cent_xy[:, None, :]) ** 2, axis=-1
+                )                                        # (N, Np_cam)
+                return np.argmin(d2, axis=1)             # (N,)
 
-        def _nearest_cam(cent_xy: np.ndarray) -> np.ndarray:
-            """Return index of nearest cam panel for each row in cent_xy."""
-            # cent_xy : (N, 2)
-            d2 = np.sum(
-                (cent_cam[None, :, :] - cent_xy[:, None, :]) ** 2, axis=-1
-            )                                        # (N, Np_cam)
-            return np.argmin(d2, axis=1)             # (N,)
+            if mask_up.any():
+                idx_up = _nearest_cam(solve_thick.centroids[mask_up, :2])
+                Cp[mask_up] = Cp_thickness[mask_up] - 0.5 * dCp[idx_up]
+            if mask_lo.any():
+                idx_lo = _nearest_cam(solve_thick.centroids[mask_lo, :2])
+                Cp[mask_lo] = Cp_thickness[mask_lo] + 0.5 * dCp[idx_lo]
 
-        if mask_up.any():
-            idx_up = _nearest_cam(solve_thick.centroids[mask_up, :2])
-            Cp[mask_up] = Cp_thickness[mask_up] - 0.5 * dCp[idx_up]
-        if mask_lo.any():
-            idx_lo = _nearest_cam(solve_thick.centroids[mask_lo, :2])
-            Cp[mask_lo] = Cp_thickness[mask_lo] + 0.5 * dCp[idx_lo]
-    else:
-        # ---- Parametric path --------------------------------------- #
-        # Upper panels are first n_up entries; lower are next n_up.
-        Cp[:n_up]         = Cp_thickness[:n_up]         - 0.5 * dCp
-        Cp[n_up:2 * n_up] = Cp_thickness[n_up:2 * n_up] + 0.5 * dCp
+        else:
+            # ---- Parametric path (pure wing mesh) -------------------- #
+            # Upper panels are first n_up entries; lower are next n_up.  #
+            Cp[:n_up]         = Cp_thickness[:n_up]         - 0.5 * dCp
+            Cp[n_up:2 * n_up] = Cp_thickness[n_up:2 * n_up] + 0.5 * dCp
+
+    # Non-lifting body panels already have Cp = Cp_thickness from the copy above.
 
     np.clip(Cp, -np.inf, 1.0, out=Cp)
 
@@ -542,8 +579,9 @@ def solve_morino(
         Cp /= pg
 
     # ------------------------------------------------------------------ #
-    # 6. Secondary Cp-based force integration (cross-check)               #
+    # 5. Secondary Cp-based force integration (cross-check)               #
     # Uses physical mesh normals and areas for correct pressure force.    #
+    # For body-only: CL_cp ≈ 0 by symmetry; CDi_cp is the body drag.    #
     # ------------------------------------------------------------------ #
     cp_forces = forces_from_cp(mesh, Cp, V_inf, rho, S_ref, b_ref, c_ref, x_ref)
 
